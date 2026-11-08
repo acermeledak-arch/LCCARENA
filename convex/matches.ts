@@ -343,7 +343,7 @@ export const getSnapshot = query({
       if (mq) {
         const questionDef = await ctx.db
           .query('questions')
-          .withIndex('by_id', (q) => q.eq('id', mq.questionId))
+          .withIndex('by_question_id', (q) => q.eq('id', mq.questionId))
           .first();
 
         const rawAttempts = await ctx.db
@@ -839,7 +839,7 @@ export const getHistoryDetail = query({
     for (const mq of mqs) {
       const qDef = await ctx.db
         .query('questions')
-        .withIndex('by_id', (q) => q.eq('id', mq.questionId))
+        .withIndex('by_question_id', (q) => q.eq('id', mq.questionId))
         .first();
 
       const rawAttempts = await ctx.db

@@ -11,6 +11,7 @@ import {
   closeModal,
   navigate,
 } from './client.js';
+import { renderQrSvg } from './qr.js';
 
 function brandHeader(rightHtml = '') {
   return `
@@ -482,7 +483,7 @@ export async function renderLobbyLaunchpad(root, roomCode) {
                 <p style="margin:0 0 12px; font-size:0.88rem; color:var(--text-muted);">
                   Hanya akses baca. Aman ditampilkan di proyektor kelas (tanpa token kontrol).
                 </p>
-                <div class="qr-box"><img alt="QR Display" src="/api/qr?text=${encodeURIComponent(dispUrl)}" /></div>
+                <div class="qr-box">${renderQrSvg(dispUrl)}</div>
                 <div style="margin-top:10px; font-size:0.82rem; word-break:break-all; color:var(--text-muted);">${esc(dispUrl)}</div>
               </div>
               <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -498,7 +499,7 @@ export async function renderLobbyLaunchpad(root, roomCode) {
                 <p style="margin:0 0 12px; font-size:0.88rem; color:var(--text-muted);">
                   Scan QR di bawah menggunakan kamera HP yang terhubung ke Wi-Fi/Hotspot yang sama.
                 </p>
-                <div class="qr-box"><img alt="QR Controller" src="/api/qr?text=${encodeURIComponent(ctrlUrl)}" /></div>
+                <div class="qr-box">${renderQrSvg(ctrlUrl)}</div>
                 <div style="margin-top:10px; font-size:0.84rem;">
                   Token Manual: <strong class="tabular" style="color:#fcd34d; letter-spacing:0.06em;">${esc(token)}</strong>
                 </div>

@@ -134,6 +134,17 @@ export async function getConvexClient() {
 }
 
 export async function apiFetch(url, { method = 'GET', body, token } = {}) {
+  if (url === '/api/server-info' && method === 'GET') {
+    return {
+      port: window.location.port ? Number(window.location.port) : (window.location.protocol === 'https:' ? 443 : 80),
+      lanOrigins: [window.location.origin],
+      serverNow: Date.now(),
+    };
+  }
+  if (url === '/api/time' && method === 'GET') {
+    return { serverNow: Date.now() };
+  }
+
   const convex = await getConvexClient();
 
   if (convex) {

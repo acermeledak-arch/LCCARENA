@@ -8,7 +8,7 @@ export default defineSchema({
     topic: v.string(),
     indicatorText: v.string(),
     sortOrder: v.number(),
-  }).index('by_id', ['id']),
+  }).index('by_indicator_id', ['id']),
 
   questions: defineTable({
     id: v.string(), // e.g. "Q001"
@@ -30,7 +30,7 @@ export default defineSchema({
     recommendedTimeSeconds: v.number(),
     isActive: v.boolean(),
   })
-    .index('by_id', ['id'])
+    .index('by_question_id', ['id'])
     .index('by_indicator', ['indicatorId']),
 
   matches: defineTable({
