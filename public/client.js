@@ -163,18 +163,22 @@ export async function apiFetch(url, { method = 'GET', body, token } = {}) {
     if (verifyMatch && method === 'POST') {
       const roomCode = verifyMatch[1];
       const tok = token || body?.token || '';
-      return await convex.mutation('matches:verifyToken', { roomCode, token: tok });
+      await convex.mutation('matches:verifyToken', { roomCode, token: tok });
+      const snap = await convex.query('matches:getSnapshot', { roomCode, role: 'controller' });
+      return { valid: true, ...snap };
     }
 
     // 4. Dispatch Action
     const actionMatch = url.match(/^\/api\/matches\/([A-Za-z0-9-]+)\/action$/);
     if (actionMatch && method === 'POST') {
       const roomCode = actionMatch[1];
-      return await convex.mutation('matches:dispatchAction', {
+      const result = await convex.mutation('matches:dispatchAction', {
         roomCode,
         token: token || '',
         action: body,
       });
+      const snap = await convex.query('matches:getSnapshot', { roomCode, role: 'controller' });
+      return { ...result, ...snap };
     }
 
     // 5. Get Snapshot
