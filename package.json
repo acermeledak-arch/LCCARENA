@@ -1,0 +1,17 @@
+{
+  "name": "lcc-arena",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LCC ARENA — Literacy & Numeracy Competition Arena (Kelas VII SMP)",
+  "type": "module",
+  "scripts": {
+    "start": "node --no-warnings server.ts",
+    "test": "node --no-warnings test.ts"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "convex": "^1.49.0"
+  }
+}
