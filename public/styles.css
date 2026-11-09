@@ -1,4 +1,5 @@
-:root {
+:root,
+[data-theme="dark"] {
   --bg-deep: #060913;
   --bg-panel: #0e1628;
   --bg-card: #141f38;
@@ -7,18 +8,92 @@
   --border-bright: #3b558c;
   --text: #f8fafc;
   --text-muted: #94a3b8;
+  --heading: #ffffff;
   --accent-blue: #3b82f6;
   --accent-purple: #a855f7;
   --accent-cyan: #06b6d4;
   --ok: #10b981;
   --ok-bg: rgba(16, 185, 129, 0.16);
+  --ok-text: #6ee7b7;
   --err: #ef4444;
   --err-bg: rgba(239, 68, 68, 0.16);
+  --err-text: #fca5a5;
   --warn: #f59e0b;
   --warn-bg: rgba(245, 158, 11, 0.18);
+  --warn-text: #fcd34d;
+  --cyan-text: #67e8f9;
+  --purple-text: #d8b4fe;
+  --option-key: #06b6d4;
+  --track: #091020;
+  --body-bg: radial-gradient(circle at 50% -10%, #162447 0%, var(--bg-deep) 62%);
+  --stage-bg: linear-gradient(180deg, #101a32 0%, #0b1224 100%);
   --radius-lg: 18px;
   --radius-md: 12px;
   --shadow: 0 14px 34px rgba(0, 0, 0, 0.45);
+}
+
+/* Theme 2: Papan Tulis Sekolah (Chalkboard Emerald) — Nyaman di mata, minim silau, kontras kapur tinggi */
+[data-theme="chalkboard"] {
+  --bg-deep: #081a12;
+  --bg-panel: #0d261a;
+  --bg-card: #133525;
+  --bg-card-alt: #1a4230;
+  --border: #1f4f37;
+  --border-bright: #2d6b4b;
+  --text: #f4fbf7;
+  --text-muted: #93c5aa;
+  --heading: #ffffff;
+  --accent-blue: #38bdf8;
+  --accent-purple: #c084fc;
+  --accent-cyan: #34d399;
+  --ok: #10b981;
+  --ok-bg: rgba(16, 185, 129, 0.2);
+  --ok-text: #a7f3d0;
+  --err: #f87171;
+  --err-bg: rgba(239, 68, 68, 0.22);
+  --err-text: #fecaca;
+  --warn: #fbbf24;
+  --warn-bg: rgba(251, 191, 36, 0.2);
+  --warn-text: #fde68a;
+  --cyan-text: #6ee7b7;
+  --purple-text: #e9d5ff;
+  --option-key: #fef08a; /* Kapur kuning hangat */
+  --track: #07150e;
+  --body-bg: radial-gradient(circle at 50% -10%, #163d2b 0%, var(--bg-deep) 65%);
+  --stage-bg: linear-gradient(180deg, #0e2b1d 0%, #091d13 100%);
+  --shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+}
+
+/* Theme 3: Kelas Terang (Whiteboard Day Mode) — Huruf hitam pekat di atas putih, anti-pantulan saat kelas siang terang benderang */
+[data-theme="light"] {
+  --bg-deep: #f1f5f9;
+  --bg-panel: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-alt: #f8fafc;
+  --border: #cbd5e1;
+  --border-bright: #94a3b8;
+  --text: #1e293b;
+  --text-muted: #64748b;
+  --heading: #0f172a;
+  --accent-blue: #2563eb;
+  --accent-purple: #9333ea;
+  --accent-cyan: #0284c7;
+  --ok: #059669;
+  --ok-bg: rgba(16, 185, 129, 0.12);
+  --ok-text: #065f46;
+  --err: #dc2626;
+  --err-bg: rgba(239, 68, 68, 0.12);
+  --err-text: #991b1b;
+  --warn: #d97706;
+  --warn-bg: rgba(245, 158, 11, 0.15);
+  --warn-text: #92400e;
+  --cyan-text: #0369a1;
+  --purple-text: #6b21a8;
+  --option-key: #0284c7;
+  --track: #e2e8f0;
+  --body-bg: #f1f5f9;
+  --stage-bg: #ffffff;
+  --shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
 }
 
 *, *::before, *::after {
@@ -29,7 +104,7 @@ html, body {
   margin: 0;
   padding: 0;
   min-height: 100%;
-  background: radial-gradient(circle at 50% -10%, #162447 0%, var(--bg-deep) 62%);
+  background: var(--body-bg);
   color: var(--text);
   font-family: 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
   line-height: 1.45;
@@ -48,6 +123,10 @@ a {
 
 .tabular {
   font-variant-numeric: tabular-nums;
+}
+
+h1, h2, h3 {
+  color: var(--heading);
 }
 
 /* Shared Layout & Surfaces */
@@ -198,11 +277,11 @@ a {
   background: var(--bg-card);
 }
 
-.badge-ok { background: var(--ok-bg); border-color: var(--ok); color: #6ee7b7; }
-.badge-err { background: var(--err-bg); border-color: var(--err); color: #fca5a5; }
-.badge-warn { background: var(--warn-bg); border-color: var(--warn); color: #fcd34d; }
-.badge-cyan { background: rgba(6, 182, 212, 0.16); border-color: var(--accent-cyan); color: #67e8f9; }
-.badge-purple { background: rgba(168, 85, 247, 0.16); border-color: var(--accent-purple); color: #d8b4fe; }
+.badge-ok { background: var(--ok-bg); border-color: var(--ok); color: var(--ok-text); }
+.badge-err { background: var(--err-bg); border-color: var(--err); color: var(--err-text); }
+.badge-warn { background: var(--warn-bg); border-color: var(--warn); color: var(--warn-text); }
+.badge-cyan { background: rgba(6, 182, 212, 0.16); border-color: var(--accent-cyan); color: var(--cyan-text); }
+.badge-purple { background: rgba(168, 85, 247, 0.16); border-color: var(--accent-purple); color: var(--purple-text); }
 
 .dot {
   width: 9px;
@@ -354,7 +433,7 @@ a {
 .timer-bar-track {
   width: 100%;
   height: 10px;
-  background: #091020;
+  background: var(--track);
   border-radius: 999px;
   overflow: hidden;
   margin-top: 10px;
@@ -389,7 +468,7 @@ a {
 }
 
 .question-stage {
-  background: linear-gradient(180deg, #101a32 0%, #0b1224 100%);
+  background: var(--stage-bg);
   border: 2px solid var(--border-bright);
   border-radius: 22px;
   padding: clamp(20px, 3vh, 40px) clamp(24px, 3.2vw, 52px);
@@ -404,7 +483,7 @@ a {
   font-size: clamp(1.6rem, 2.85vw, 2.85rem);
   font-weight: 700;
   line-height: 1.35;
-  color: #ffffff;
+  color: var(--heading);
   margin: 0;
 }
 
@@ -445,7 +524,7 @@ a {
   display: grid;
   place-items: center;
   font-weight: 900;
-  color: var(--accent-cyan);
+  color: var(--option-key);
   flex-shrink: 0;
 }
 

@@ -15,6 +15,35 @@ import {
   playWrongSound,
 } from './audio.js';
 
+export const DISPLAY_THEMES = [
+  { id: 'dark', label: 'Dark Arena', icon: '🌙' },
+  { id: 'chalkboard', label: 'Papan Tulis', icon: '🟩' },
+  { id: 'light', label: 'Kelas Terang', icon: '☀️' },
+];
+
+export function getDisplayTheme() {
+  const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('lcc_display_theme') : null;
+  return DISPLAY_THEMES.find((t) => t.id === saved) || DISPLAY_THEMES[0];
+}
+
+export function setDisplayTheme(themeId) {
+  const t = DISPLAY_THEMES.find((item) => item.id === themeId) || DISPLAY_THEMES[0];
+  try {
+    localStorage.setItem('lcc_display_theme', t.id);
+  } catch {
+    /* ignore */
+  }
+  document.documentElement.setAttribute('data-theme', t.id);
+  return t;
+}
+
+export function cycleDisplayTheme() {
+  const cur = getDisplayTheme();
+  const idx = DISPLAY_THEMES.findIndex((t) => t.id === cur.id);
+  const next = DISPLAY_THEMES[(idx + 1) % DISPLAY_THEMES.length];
+  return setDisplayTheme(next.id);
+}
+
 function statusInfo(snap) {
   const mStatus = snap.match.status;
   const q = snap.currentQuestion;
@@ -114,6 +143,8 @@ function renderPodium(snap, online) {
         </div>
         <div class="display-meta">
           <span class="badge"><span class="dot ${online ? 'dot-online' : 'dot-offline'}" data-conn-dot></span> <span data-conn-text>${online ? 'ONLINE' : 'MENYAMBUNG ULANG'}</span></span>
+          <button class="btn btn-sm" id="btn-theme" title="Ganti Tema Tampilan IFP">${getDisplayTheme().icon} ${getDisplayTheme().label}</button>
+          <button class="btn btn-sm" id="btn-fs" title="Layar Penuh">⛶</button>
         </div>
       </header>
 
@@ -159,6 +190,7 @@ export async function renderDisplayView(root, roomCode) {
   let snap = null;
   let online = true;
 
+  setDisplayTheme(getDisplayTheme().id);
   await calibrateClock();
 
   try {
@@ -182,6 +214,11 @@ export async function renderDisplayView(root, roomCode) {
 
     if (snap.match.status === 'MATCH_FINISHED') {
       root.innerHTML = renderPodium(snap, online);
+      root.querySelector('#btn-theme')?.addEventListener('click', () => {
+        cycleDisplayTheme();
+        render();
+      });
+      root.querySelector('#btn-fs')?.addEventListener('click', toggleFullscreen);
       root.querySelector('#disp-new-match')?.addEventListener('click', () => navigate('/setup'));
       root.querySelector('#disp-go-history')?.addEventListener('click', () => navigate(`/history/${encodeURIComponent(snap.match.id)}`));
       root.querySelector('#disp-go-home')?.addEventListener('click', () => navigate('/'));
@@ -202,6 +239,7 @@ export async function renderDisplayView(root, roomCode) {
             <div class="display-meta">
               <span class="badge badge-cyan tabular" style="font-size:1rem;">RUANG #${esc(snap.match.roomCode)}</span>
               <span class="badge"><span class="dot ${online ? 'dot-online' : 'dot-offline'}" data-conn-dot></span> <span data-conn-text>${online ? 'ONLINE' : 'OFFLINE'}</span></span>
+              <button class="btn btn-sm" id="btn-theme" title="Ganti Tema Tampilan IFP">${getDisplayTheme().icon} ${getDisplayTheme().label}</button>
               <button class="btn btn-sm" id="btn-sound" title="Pengaturan Suara">${isSoundEnabled() ? '🔊 Suara: ON' : '🔇 Suara: OFF'}</button>
               <button class="btn btn-sm" id="btn-fs" title="Layar Penuh">⛶ Layar Penuh</button>
             </div>
@@ -218,6 +256,10 @@ export async function renderDisplayView(root, roomCode) {
           ${renderScoreboard(snap)}
         </div>
       `;
+      root.querySelector('#btn-theme')?.addEventListener('click', () => {
+        cycleDisplayTheme();
+        render();
+      });
       root.querySelector('#btn-fs')?.addEventListener('click', toggleFullscreen);
       root.querySelector('#btn-sound')?.addEventListener('click', () => {
         setSoundEnabled(!isSoundEnabled());
@@ -250,6 +292,7 @@ export async function renderDisplayView(root, roomCode) {
             ${q ? `<span class="badge badge-purple">${esc(q.category)} — ${esc(q.topic)}</span>` : ''}
             ${q ? `<span class="badge badge-cyan tabular" style="font-size:0.98rem;">SOAL ${q.sequenceNumber} / ${q.totalQuestions}</span>` : ''}
             <span class="badge"><span class="dot ${online ? 'dot-online' : 'dot-offline'}" data-conn-dot></span> <span data-conn-text>${online ? 'ONLINE' : 'OFFLINE'}</span></span>
+            <button class="btn btn-sm" id="btn-theme" title="Ganti Tema Tampilan IFP">${getDisplayTheme().icon} ${getDisplayTheme().label}</button>
             <button class="btn btn-sm" id="btn-sound" title="Pengaturan Suara">${isSoundEnabled() ? '🔊 Suara: ON' : '🔇 Suara: OFF'}</button>
             <button class="btn btn-sm" id="btn-fs" title="Layar Penuh">⛶</button>
           </div>
@@ -317,7 +360,7 @@ export async function renderDisplayView(root, roomCode) {
                 q?.correctOption && q?.explanation
                   ? `
                   <div class="explanation-box">
-                    <strong style="color:#6ee7b7;">Kunci Jawaban: ${esc(q.correctOption)}</strong> — ${esc(q.explanation)}
+                    <strong style="color:var(--ok); font-weight:800;">Kunci Jawaban: ${esc(q.correctOption)}</strong> — ${esc(q.explanation)}
                   </div>
                 `
                   : ''
@@ -330,6 +373,10 @@ export async function renderDisplayView(root, roomCode) {
       </div>
     `;
 
+    root.querySelector('#btn-theme')?.addEventListener('click', () => {
+      cycleDisplayTheme();
+      render();
+    });
     root.querySelector('#btn-fs')?.addEventListener('click', toggleFullscreen);
     root.querySelector('#btn-sound')?.addEventListener('click', () => {
       setSoundEnabled(!isSoundEnabled());
@@ -412,5 +459,6 @@ export async function renderDisplayView(root, roomCode) {
   return () => {
     clearInterval(tickId);
     disconnect();
+    document.documentElement.removeAttribute('data-theme');
   };
 }
