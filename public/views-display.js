@@ -196,7 +196,7 @@ export async function renderDisplayView(root, roomCode) {
               <div class="brand-mark">LCC</div>
               <div>
                 <div>LCC ARENA</div>
-                <div style="font-size:0.8rem; color:var(--text-muted);">${esc(modeLabel(snap.match.mode))} • ${snap.match.totalQuestions} Soal</div>
+                <div style="font-size:0.8rem; color:var(--text-muted);">${esc(modeLabel(snap.match.mode))}${snap.match.settings.bank === 'ADVANCED' ? ' • Bank Lanjutan' : ''} • ${snap.match.totalQuestions} Soal</div>
               </div>
             </div>
             <div class="display-meta">
@@ -274,7 +274,7 @@ export async function renderDisplayView(root, roomCode) {
             ${
               q
                 ? `<div style="text-align:right; flex-shrink:0;">
-                    <span class="badge">${q.difficulty === 'easy' ? 'Level 1 • Mudah' : `Level ${q.level} • Menengah`}</span>
+                    <span class="badge">Level ${q.level} • ${{ easy: 'Mudah', medium: 'Menengah', hard: 'Sulit' }[q.difficulty] ?? ''}</span>
                   </div>`
                 : ''
             }

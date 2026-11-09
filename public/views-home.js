@@ -126,7 +126,7 @@ export async function renderHomeView(root) {
           <div class="card" style="padding:12px 14px;">
             <div style="font-size:0.78rem; color:var(--accent-cyan); font-weight:700;">${esc(ind.id)} • ${esc(ind.category)}</div>
             <div style="font-weight:700; margin:3px 0 4px;">${esc(ind.topic)}</div>
-            <div style="font-size:0.82rem; color:var(--text-muted);">${esc(ind.questionCount)} soal (1 Mudah, 2 Menengah)</div>
+            <div style="font-size:0.82rem; color:var(--text-muted);">${esc(ind.questionCount)} soal Dasar • ${esc(ind.advancedCount ?? 0)} soal Lanjutan</div>
           </div>
         `,
         )
@@ -177,13 +177,29 @@ export async function renderSetupView(root) {
           </div>
         </div>
 
-        <h2 style="font-size:1.08rem; margin:0 0 12px;">2. Mode Permainan</h2>
+        <h2 style="font-size:1.08rem; margin:0 0 12px;">2. Bank Soal &amp; Mode Permainan</h2>
+        <div class="grid-2" style="margin-bottom:12px;" id="bank-cards">
+          <label class="check-card">
+            <input type="radio" name="bank" value="BASIC" checked />
+            <div>
+              <div style="font-weight:800;">Bank Dasar</div>
+              <div style="font-size:0.84rem; color:var(--text-muted);">Q001–Q039 • Level 1 Mudah, Level 2–3 Menengah.</div>
+            </div>
+          </label>
+          <label class="check-card">
+            <input type="radio" name="bank" value="ADVANCED" />
+            <div>
+              <div style="font-weight:800;">Bank Lanjutan (Menengah &amp; Sulit)</div>
+              <div style="font-size:0.84rem; color:var(--text-muted);">Q040–Q065 • Level 2 Menengah, Level 3 Sulit. Disarankan 25 detik.</div>
+            </div>
+          </label>
+        </div>
         <div class="grid-3" style="margin-bottom:18px;" id="mode-cards">
           <label class="check-card">
             <input type="radio" name="mode" value="FULL" checked />
             <div>
               <div style="font-weight:800;">Full Competition</div>
-              <div style="font-size:0.84rem; color:var(--text-muted);">Semua 39 soal lengkap dari 13 indikator kisi-kisi.</div>
+              <div style="font-size:0.84rem; color:var(--text-muted);">Semua soal dari bank terpilih (13 indikator kisi-kisi).</div>
             </div>
           </label>
           <label class="check-card">
@@ -229,7 +245,7 @@ export async function renderSetupView(root) {
           <div style="margin-top:14px;">
             <div style="font-weight:700; margin-bottom:8px;">Filter Level Kesulitan</div>
             <div style="display:flex; gap:12px; flex-wrap:wrap;">
-              <label class="check-card" style="padding:8px 12px;">
+              <label class="check-card" style="padding:8px 12px;" id="lvl1-card">
                 <input type="checkbox" name="lvl" value="1" checked />
                 <span>Level 1 (Mudah)</span>
               </label>
@@ -239,7 +255,7 @@ export async function renderSetupView(root) {
               </label>
               <label class="check-card" style="padding:8px 12px;">
                 <input type="checkbox" name="lvl" value="3" checked />
-                <span>Level 3 (Menengah)</span>
+                <span id="lvl3-label">Level 3 (Menengah)</span>
               </label>
             </div>
           </div>
@@ -326,17 +342,22 @@ export async function renderSetupView(root) {
   const errBox = root.querySelector('#setup-err');
 
   const getSelectedMode = () => form.querySelector('input[name="mode"]:checked')?.value || 'FULL';
+  const getSelectedBank = () => form.querySelector('input[name="bank"]:checked')?.value || 'BASIC';
   const getSelectedInds = () => [...form.querySelectorAll('input[name="ind"]:checked')].map((el) => el.value);
   const getSelectedLvls = () => [...form.querySelectorAll('input[name="lvl"]:checked')].map((el) => Number(el.value));
 
   const syncUi = () => {
     const mode = getSelectedMode();
+    const bankId = getSelectedBank();
     filterSec.style.display = mode === 'FULL' ? 'none' : 'block';
     quickSec.style.display = mode === 'QUICK' ? 'block' : 'none';
+    // Bank Lanjutan has no Level 1 questions.
+    root.querySelector('#lvl1-card').style.display = bankId === 'ADVANCED' ? 'none' : '';
+    root.querySelector('#lvl3-label').textContent = bankId === 'ADVANCED' ? 'Level 3 (Sulit)' : 'Level 3 (Menengah)';
 
-    const indCount = mode === 'FULL' ? 13 : getSelectedInds().length;
-    const lvlCount = mode === 'FULL' ? 3 : getSelectedLvls().length;
-    const available = indCount * lvlCount;
+    const inds = new Set(mode === 'FULL' ? bank.indicators.map((i) => i.id) : getSelectedInds());
+    const lvls = new Set(mode === 'FULL' ? [1, 2, 3] : getSelectedLvls());
+    const available = (bank.pool || []).filter((q) => q.bank === bankId && inds.has(q.indicatorId) && lvls.has(q.level)).length;
 
     if (mode === 'QUICK') {
       const req = Number(qCountInp.value || 0);
@@ -350,6 +371,13 @@ export async function renderSetupView(root) {
     r.addEventListener('change', () => {
       if (getSelectedMode() === 'QUICK') orderSel.value = 'random';
       else if (getSelectedMode() === 'FULL') orderSel.value = 'sequential';
+      syncUi();
+    }),
+  );
+  form.querySelectorAll('input[name="bank"]').forEach((r) =>
+    r.addEventListener('change', () => {
+      // Doc recommendation: 20 s for Bank Dasar, 25 s for Bank Lanjutan (operator may still edit).
+      root.querySelector('#dur-inp').value = getSelectedBank() === 'ADVANCED' ? 25 : 20;
       syncUi();
     }),
   );
@@ -371,6 +399,8 @@ export async function renderSetupView(root) {
     });
   });
 
+  syncUi();
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     errBox.style.display = 'none';
@@ -386,6 +416,7 @@ export async function renderSetupView(root) {
           root.querySelector('#p3').value,
         ],
         mode,
+        bank: getSelectedBank(),
         indicatorIds: mode === 'FULL' ? undefined : getSelectedInds(),
         levels: mode === 'FULL' ? undefined : getSelectedLvls(),
         questionCount: mode === 'QUICK' ? Number(qCountInp.value) : undefined,

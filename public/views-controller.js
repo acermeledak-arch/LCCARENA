@@ -263,7 +263,7 @@ export async function renderControllerView(root, roomCode) {
         <div class="ctrl-shell">
           ${topBarHtml}
           <section class="panel">
-            <span class="badge badge-cyan" style="margin-bottom:8px;">${esc(modeLabel(m.mode))} • ${m.totalQuestions} Soal</span>
+            <span class="badge badge-cyan" style="margin-bottom:8px;">${esc(modeLabel(m.mode))}${m.settings.bank === 'ADVANCED' ? ' • Bank Lanjutan' : ''} • ${m.totalQuestions} Soal</span>
             <h1 style="font-size:1.35rem; margin:0 0 8px;">Ruang Siap Dimulai</h1>
             <p style="font-size:0.9rem; color:var(--text-muted); margin:0 0 16px;">
               Pastikan layar Display pada IFP sudah terbuka (${dispCount > 0 ? '✅ Terhubung' : '⚠️ Belum terdeteksi'}), lalu tekan tombol di bawah.
@@ -403,7 +403,7 @@ export async function renderControllerView(root, roomCode) {
       <section class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
           <span style="font-size:0.78rem; font-weight:800; color:var(--accent-cyan);">
-            ${esc(q.questionId)} • ${esc(q.topic)} (${q.difficulty === 'easy' ? 'Mudah' : `L${q.level} Menengah`})
+            ${esc(q.questionId)} • ${esc(q.topic)} (L${q.level} ${{ easy: 'Mudah', medium: 'Menengah', hard: 'Sulit' }[q.difficulty] ?? ''})
           </span>
           <button class="btn btn-sm" id="btn-toggle-key" style="min-height:30px; padding:3px 10px; font-size:0.76rem;">
             ${showOperatorKey ? 'Sembunyikan Kunci' : 'Lihat Kunci'}

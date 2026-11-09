@@ -150,6 +150,7 @@ export async function apiFetch(url, { method = 'GET', body, token } = {}) {
   if (convex) {
     // 1. Bank Summary
     if (url === '/api/bank' && method === 'GET') {
+      await convex.mutation('matches:ensureSeed', {}); // adds new seed packs to an already-seeded DB
       return await convex.query('matches:getBankSummary', {});
     }
 
