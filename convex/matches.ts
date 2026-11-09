@@ -1,4 +1,4 @@
-import { mutation, query } from './_generated/server';
+import { mutation, query, type MutationCtx } from './_generated/server';
 import { v } from 'convex/values';
 import { SEED_DATA } from './seedData';
 
@@ -43,42 +43,50 @@ function computeStandings<T extends { _id: string; seatNumber: number; score: nu
   return { bySeat: [...withRank].sort((a, b) => a.seatNumber - b.seatNumber), standings };
 }
 
-// Ensure seed questions & indicators are initialized in Convex DB
+// Insert any seed indicator/question whose id is not yet in Convex DB (so new packs reach existing deployments).
+async function syncSeed(ctx: MutationCtx): Promise<number> {
+  const haveInd = new Set((await ctx.db.query('indicators').collect()).map((i) => i.id));
+  for (const ind of SEED_DATA.indicators) {
+    if (haveInd.has(ind.id)) continue;
+    await ctx.db.insert('indicators', {
+      id: ind.id,
+      category: ind.category,
+      topic: ind.topic,
+      indicatorText: ind.indicator_text,
+      sortOrder: ind.sort_order,
+    });
+  }
+
+  const haveQ = new Set((await ctx.db.query('questions').collect()).map((q) => q.id));
+  let added = 0;
+  for (const q of SEED_DATA.questions) {
+    if (haveQ.has(q.id)) continue;
+    await ctx.db.insert('questions', {
+      id: q.id,
+      indicatorId: q.indicator_id,
+      category: q.category,
+      topic: q.topic,
+      level: q.level,
+      difficulty: q.difficulty as 'easy' | 'medium' | 'hard',
+      bank: q.bank === 'ADVANCED' ? 'ADVANCED' : 'BASIC',
+      question: q.question,
+      options: q.options,
+      correctOption: q.correct_option as 'A' | 'B' | 'C' | 'D',
+      explanation: q.explanation,
+      points: q.points,
+      recommendedTimeSeconds: q.recommended_time_seconds,
+      isActive: q.is_active,
+    });
+    added++;
+  }
+  return added;
+}
+
 export const ensureSeed = mutation({
   args: {},
   handler: async (ctx) => {
-    const existing = await ctx.db.query('questions').first();
-    if (existing) return { initialized: false };
-
-    for (const ind of SEED_DATA.indicators) {
-      await ctx.db.insert('indicators', {
-        id: ind.id,
-        category: ind.category,
-        topic: ind.topic,
-        indicatorText: ind.indicator_text,
-        sortOrder: ind.sort_order,
-      });
-    }
-
-    for (const q of SEED_DATA.questions) {
-      await ctx.db.insert('questions', {
-        id: q.id,
-        indicatorId: q.indicator_id,
-        category: q.category,
-        topic: q.topic,
-        level: q.level,
-        difficulty: q.difficulty as 'easy' | 'medium',
-        question: q.question,
-        options: q.options,
-        correctOption: q.correct_option as 'A' | 'B' | 'C' | 'D',
-        explanation: q.explanation,
-        points: q.points,
-        recommendedTimeSeconds: q.recommended_time_seconds,
-        isActive: q.is_active,
-      });
-    }
-
-    return { initialized: true, total: SEED_DATA.questions.length };
+    const added = await syncSeed(ctx);
+    return { initialized: added > 0, added, total: SEED_DATA.questions.length };
   },
 });
 
@@ -87,16 +95,19 @@ export const getBankSummary = query({
   handler: async (ctx) => {
     const indicators = await ctx.db.query('indicators').collect();
     indicators.sort((a, b) => a.sortOrder - b.sortOrder);
-    const questions = await ctx.db.query('questions').collect();
+    const questions = (await ctx.db.query('questions').collect()).filter((q) => q.isActive);
 
     const withCount = indicators.map((ind) => {
-      const qCount = questions.filter((q) => q.indicatorId === ind.id && q.isActive).length;
-      return { ...ind, questionCount: qCount };
+      const own = questions.filter((q) => q.indicatorId === ind.id);
+      const advancedCount = own.filter((q) => q.bank === 'ADVANCED').length;
+      return { ...ind, questionCount: own.length - advancedCount, advancedCount };
     });
 
     return {
       indicators: withCount,
-      totalQuestions: questions.filter((q) => q.isActive).length,
+      totalQuestions: questions.length,
+      // Compact list so the setup page can count the exact pool for any bank/indicator/level filter.
+      pool: questions.map((q) => ({ indicatorId: q.indicatorId, level: q.level, bank: q.bank ?? 'BASIC' })),
     };
   },
 });
@@ -114,38 +125,10 @@ export const createMatch = mutation({
     pointsCorrect: v.optional(v.number()),
     showOptionsOnDisplay: v.optional(v.boolean()),
     allowAnswerReveal: v.optional(v.boolean()),
+    bank: v.optional(v.union(v.literal('BASIC'), v.literal('ADVANCED'))),
   },
   handler: async (ctx, args) => {
-    // Auto-seed if database is fresh
-    const anyQ = await ctx.db.query('questions').first();
-    if (!anyQ) {
-      for (const ind of SEED_DATA.indicators) {
-        await ctx.db.insert('indicators', {
-          id: ind.id,
-          category: ind.category,
-          topic: ind.topic,
-          indicatorText: ind.indicator_text,
-          sortOrder: ind.sort_order,
-        });
-      }
-      for (const q of SEED_DATA.questions) {
-        await ctx.db.insert('questions', {
-          id: q.id,
-          indicatorId: q.indicator_id,
-          category: q.category,
-          topic: q.topic,
-          level: q.level,
-          difficulty: q.difficulty as 'easy' | 'medium',
-          question: q.question,
-          options: q.options,
-          correctOption: q.correct_option as 'A' | 'B' | 'C' | 'D',
-          explanation: q.explanation,
-          points: q.points,
-          recommendedTimeSeconds: q.recommended_time_seconds,
-          isActive: q.is_active,
-        });
-      }
-    }
+    await syncSeed(ctx);
 
     if (!Array.isArray(args.players) || args.players.length !== 3) {
       throw new Error('Pertandingan wajib diikuti tepat 3 peserta.');
@@ -197,10 +180,13 @@ export const createMatch = mutation({
           ? [...new Set(args.levels.filter((l) => [1, 2, 3].includes(l)))].sort()
           : [1, 2, 3];
 
+    const bank = args.bank === 'ADVANCED' ? 'ADVANCED' : 'BASIC';
     const allQ = await ctx.db.query('questions').collect();
     const indIdSet = new Set(indicatorIds);
     const lvlSet = new Set(levels);
-    const pool = allQ.filter((q) => q.isActive && indIdSet.has(q.indicatorId) && lvlSet.has(q.level));
+    const pool = allQ.filter(
+      (q) => q.isActive && (q.bank ?? 'BASIC') === bank && indIdSet.has(q.indicatorId) && lvlSet.has(q.level),
+    );
 
     if (pool.length === 0) throw new Error('Tidak ada soal yang tersedia untuk filter yang dipilih.');
 
@@ -261,6 +247,7 @@ export const createMatch = mutation({
         levels,
         questionCount: selectedIds.length,
         allowRepeat,
+        bank,
       },
       currentQuestionIndex: 0,
       currentQuestionId: selectedIds[0],

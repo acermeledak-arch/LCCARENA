@@ -16,7 +16,8 @@ export default defineSchema({
     category: v.string(),
     topic: v.string(),
     level: v.number(),
-    difficulty: v.union(v.literal('easy'), v.literal('medium')),
+    difficulty: v.union(v.literal('easy'), v.literal('medium'), v.literal('hard')),
+    bank: v.optional(v.union(v.literal('BASIC'), v.literal('ADVANCED'))), // ponytail: missing = 'BASIC' (old Q001–Q039 docs)
     question: v.string(),
     options: v.object({
       A: v.string(),
@@ -56,6 +57,7 @@ export default defineSchema({
       levels: v.array(v.number()),
       questionCount: v.number(),
       allowRepeat: v.boolean(),
+      bank: v.optional(v.union(v.literal('BASIC'), v.literal('ADVANCED'))),
     }),
     currentQuestionIndex: v.number(),
     currentQuestionId: v.optional(v.string()),
