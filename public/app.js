@@ -1,67 +1,60 @@
-import { setRouteHandler, closeModal } from './client.js';
-import { renderHomeView, renderSetupView, renderLobbyLaunchpad, renderHistoryView } from './views-home.js';
-import { renderDisplayView } from './views-display.js';
-import { renderControllerView } from './views-controller.js';
+import { setRouteHandler, closeModal, setActiveTheme, getActiveTheme } from './client.js';
+import { renderHomeView, renderSetupView, renderSessionsListView } from './views-home.js';
+import { renderHostScreen } from './views-display.js';
+import { renderParticipantView } from './views-controller.js';
 
 const appRoot = document.getElementById('app');
 let activeCleanup = null;
 
+setActiveTheme(getActiveTheme().id);
+
 async function handleRoute() {
   closeModal();
   if (typeof activeCleanup === 'function') {
-    try { activeCleanup(); } catch { /* ignore */ }
+    try {
+      activeCleanup();
+    } catch {
+      /* ignore */
+    }
     activeCleanup = null;
   }
 
   const p = decodeURIComponent(window.location.pathname).replace(/\/+$/, '') || '/';
 
   if (p === '/') {
-    document.title = 'LCC ARENA — Simulasi Cerdas Cermat Numerasi SMP';
+    document.title = 'Simulasi CPNS — Drilling CAT TIU & Live Scoring';
     activeCleanup = await renderHomeView(appRoot);
     return;
   }
 
   if (p === '/setup') {
-    document.title = 'Setup Pertandingan — LCC ARENA';
+    document.title = 'Buat Sesi Baru — Simulasi CPNS';
     activeCleanup = await renderSetupView(appRoot);
     return;
   }
 
-  const lobbyMatch = p.match(/^\/lobby\/([A-Za-z0-9-]+)$/);
-  if (lobbyMatch) {
-    document.title = `Lobby #${lobbyMatch[1].toUpperCase()} — LCC ARENA`;
-    activeCleanup = await renderLobbyLaunchpad(appRoot, lobbyMatch[1]);
+  if (p === '/sessions' || p === '/history') {
+    document.title = 'Daftar Sesi — Simulasi CPNS';
+    activeCleanup = await renderSessionsListView(appRoot);
     return;
   }
 
-  const dispMatch = p.match(/^\/display\/([A-Za-z0-9-]+)$/);
-  if (dispMatch) {
-    document.title = `Display #${dispMatch[1].toUpperCase()} — LCC ARENA`;
-    activeCleanup = await renderDisplayView(appRoot, dispMatch[1]);
+  const hostMatch = p.match(/^\/(?:host|display|lobby)\/([A-Za-z0-9-]+)$/);
+  if (hostMatch) {
+    const code = hostMatch[1].toUpperCase();
+    document.title = `Host Sesi #${code} — Simulasi CPNS`;
+    activeCleanup = await renderHostScreen(appRoot, code);
     return;
   }
 
-  const ctrlMatch = p.match(/^\/controller\/([A-Za-z0-9-]+)$/);
-  if (ctrlMatch) {
-    document.title = `Controller #${ctrlMatch[1].toUpperCase()} — LCC ARENA`;
-    activeCleanup = await renderControllerView(appRoot, ctrlMatch[1]);
+  const playMatch = p.match(/^\/(?:join|play|peserta|controller)\/([A-Za-z0-9-]+)$/);
+  if (playMatch) {
+    const code = playMatch[1].toUpperCase();
+    document.title = `Peserta Sesi #${code} — Simulasi CPNS`;
+    activeCleanup = await renderParticipantView(appRoot, code);
     return;
   }
 
-  if (p === '/history') {
-    document.title = 'Riwayat Pertandingan — LCC ARENA';
-    activeCleanup = await renderHistoryView(appRoot, null);
-    return;
-  }
-
-  const histDetail = p.match(/^\/history\/([A-Za-z0-9-]+)$/);
-  if (histDetail) {
-    document.title = 'Detail Riwayat — LCC ARENA';
-    activeCleanup = await renderHistoryView(appRoot, histDetail[1]);
-    return;
-  }
-
-  // Fallback to Home
   window.history.replaceState(null, '', '/');
   activeCleanup = await renderHomeView(appRoot);
 }
