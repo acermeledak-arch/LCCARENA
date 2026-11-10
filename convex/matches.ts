@@ -1,9 +1,8 @@
-import { mutation, query, type MutationCtx } from './_generated/server';
+import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server.js';
 import { v } from 'convex/values';
-import { SEED_DATA } from './seedData';
+import { SEED_DATA } from './seedData.ts';
 
 const SAFE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-const PLAYER_COLORS = ['#3b82f6', '#a855f7', '#06b6d4'] as const;
 
 function randomCode(len: number): string {
   let out = '';
@@ -13,12 +12,12 @@ function randomCode(len: number): string {
   return out;
 }
 
-function generateControllerToken(): string {
-  return `${randomCode(4)}-${randomCode(4)}-${randomCode(4)}`;
+function generateSecretToken(prefix: string): string {
+  return `${prefix}-${randomCode(4)}-${randomCode(4)}-${randomCode(4)}`;
 }
 
-async function hashToken(token: string): Promise<string> {
-  const data = new TextEncoder().encode(token.trim().toUpperCase());
+export async function hashToken(token: string): Promise<string> {
+  const data = new TextEncoder().encode((token || '').trim().toUpperCase());
   const hashBuffer = await crypto.subtle.digest('SHA-256', data);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -33,53 +32,130 @@ function shuffleArray<T>(items: T[]): T[] {
   return arr;
 }
 
-function computeStandings<T extends { _id: string; seatNumber: number; score: number }>(players: T[]) {
-  const withRank = players.map((p) => {
-    const higher = players.filter((other) => other.score > p.score).length;
-    const same = players.filter((other) => other.score === p.score).length;
-    return { ...p, rank: 1 + higher, isTied: same > 1 };
-  });
-  const standings = [...withRank].sort((a, b) => b.score - a.score || a.seatNumber - b.seatNumber);
-  return { bySeat: [...withRank].sort((a, b) => a.seatNumber - b.seatNumber), standings };
+function sanitizeName(raw: string): string {
+  return (raw || '')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-// Insert any seed indicator/question whose id is not yet in Convex DB (so new packs reach existing deployments).
+export function computeLeaderboard<
+  T extends {
+    _id: any;
+    displayName: string;
+    status: string;
+    answeredCount: number;
+    correctCount: number;
+    wrongCount: number;
+    score: number;
+    accuracy: number;
+    joinedAt: number;
+  },
+>(participants: T[], totalQuestions: number) {
+  // Sort by score DESC, then correctCount DESC, then displayName ASC for deterministic display
+  const sorted = [...participants].sort(
+    (a, b) =>
+      b.score - a.score ||
+      b.correctCount - a.correctCount ||
+      a.displayName.localeCompare(b.displayName, 'id'),
+  );
+
+  return sorted.map((p) => {
+    const higher = participants.filter(
+      (other) =>
+        other.score > p.score ||
+        (other.score === p.score && other.correctCount > p.correctCount),
+    ).length;
+    const same = participants.filter(
+      (other) => other.score === p.score && other.correctCount === p.correctCount,
+    ).length;
+    const unansweredCount = Math.max(0, totalQuestions - p.answeredCount);
+    return {
+      participantId: String(p._id),
+      rank: 1 + higher,
+      isTied: same > 1,
+      displayName: p.displayName,
+      status: p.status,
+      answeredCount: p.answeredCount,
+      correctCount: p.correctCount,
+      wrongCount: p.wrongCount,
+      unansweredCount,
+      score: p.score,
+      accuracy: p.accuracy,
+      joinedAt: p.joinedAt,
+    };
+  });
+}
+
+// Sync 10 TIU sub-indicators and 105 TIU questions into Convex DB
 async function syncSeed(ctx: MutationCtx): Promise<number> {
-  const haveInd = new Set((await ctx.db.query('indicators').collect()).map((i) => i.id));
-  for (const ind of SEED_DATA.indicators) {
-    if (haveInd.has(ind.id)) continue;
-    await ctx.db.insert('indicators', {
-      id: ind.id,
-      category: ind.category,
-      topic: ind.topic,
-      indicatorText: ind.indicator_text,
-      sortOrder: ind.sort_order,
-    });
+  const existingSubs = await ctx.db.query('subIndicators').collect();
+  const subById = new Map(existingSubs.map((s) => [s.id, s]));
+
+  for (const sub of SEED_DATA.subIndicators) {
+    const found = subById.get(sub.id);
+    if (!found) {
+      await ctx.db.insert('subIndicators', {
+        id: sub.id,
+        category: sub.category,
+        subIndicator: sub.subIndicator,
+        description: sub.description,
+        sortOrder: sub.sortOrder,
+      });
+    }
   }
 
-  const haveQ = new Set((await ctx.db.query('questions').collect()).map((q) => q.id));
-  let added = 0;
-  for (const q of SEED_DATA.questions) {
-    if (haveQ.has(q.id)) continue;
-    await ctx.db.insert('questions', {
-      id: q.id,
-      indicatorId: q.indicator_id,
-      category: q.category,
-      topic: q.topic,
-      level: q.level,
-      difficulty: q.difficulty as 'easy' | 'medium' | 'hard',
-      bank: q.bank === 'ADVANCED' ? 'ADVANCED' : 'BASIC',
-      question: q.question,
-      options: q.options,
-      correctOption: q.correct_option as 'A' | 'B' | 'C' | 'D',
-      explanation: q.explanation,
-      points: q.points,
-      recommendedTimeSeconds: q.recommended_time_seconds,
-      isActive: q.is_active,
-    });
-    added++;
+  const existingQs = await ctx.db.query('questionBank').collect();
+  const validIds = new Set(SEED_DATA.questions.map((q) => q.id));
+
+  // Deactivate/remove any non-TIU question if any ever existed
+  for (const oldQ of existingQs) {
+    if (!validIds.has(oldQ.id)) {
+      await ctx.db.delete(oldQ._id);
+    }
   }
-  return added;
+
+  const qById = new Map(existingQs.filter((q) => validIds.has(q.id)).map((q) => [q.id, q]));
+  let addedOrUpdated = 0;
+
+  for (const q of SEED_DATA.questions) {
+    const existing = qById.get(q.id);
+    if (!existing) {
+      await ctx.db.insert('questionBank', {
+        id: q.id,
+        subIndicatorId: q.subIndicatorId,
+        category: q.category,
+        subIndicator: q.subIndicator,
+        question: q.question,
+        options: q.options,
+        figural: q.figural,
+        correctOption: q.correctOption as 'A' | 'B' | 'C' | 'D' | 'E',
+        explanation: q.explanation,
+        explanationParts: q.explanationParts,
+        sourcePack: q.sourcePack,
+        isActive: q.isActive,
+      });
+      addedOrUpdated++;
+    } else if (
+      existing.question !== q.question ||
+      existing.explanation !== q.explanation ||
+      Boolean(existing.figural) !== Boolean(q.figural)
+    ) {
+      await ctx.db.patch(existing._id, {
+        question: q.question,
+        options: q.options,
+        figural: q.figural,
+        correctOption: q.correctOption as 'A' | 'B' | 'C' | 'D' | 'E',
+        explanation: q.explanation,
+        explanationParts: q.explanationParts,
+        sourcePack: q.sourcePack,
+        isActive: q.isActive,
+      });
+      addedOrUpdated++;
+    }
+  }
+
+  return addedOrUpdated;
 }
 
 export const ensureSeed = mutation({
@@ -93,842 +169,1062 @@ export const ensureSeed = mutation({
 export const getBankSummary = query({
   args: {},
   handler: async (ctx) => {
-    const indicators = await ctx.db.query('indicators').collect();
-    indicators.sort((a, b) => a.sortOrder - b.sortOrder);
-    const questions = (await ctx.db.query('questions').collect()).filter((q) => q.isActive);
+    const subIndicators = await ctx.db.query('subIndicators').collect();
+    subIndicators.sort((a, b) => a.sortOrder - b.sortOrder);
+    const questions = (await ctx.db.query('questionBank').collect()).filter((q) => q.isActive);
 
-    const withCount = indicators.map((ind) => {
-      const own = questions.filter((q) => q.indicatorId === ind.id);
-      const advancedCount = own.filter((q) => q.bank === 'ADVANCED').length;
-      return { ...ind, questionCount: own.length - advancedCount, advancedCount };
+    const withCount = subIndicators.map((sub) => {
+      const count = questions.filter((q) => q.subIndicatorId === sub.id).length;
+      return { ...sub, questionCount: count };
     });
 
+    const categories = ['TIU Verbal', 'TIU Numerik', 'TIU Figural'].map((cat) => ({
+      category: cat,
+      questionCount: questions.filter((q) => q.category === cat).length,
+    }));
+
     return {
-      indicators: withCount,
+      subIndicators: withCount,
+      categories,
       totalQuestions: questions.length,
-      // Compact list so the setup page can count the exact pool for any bank/indicator/level filter.
-      pool: questions.map((q) => ({ indicatorId: q.indicatorId, level: q.level, bank: q.bank ?? 'BASIC' })),
+      pool: questions.map((q) => ({
+        id: q.id,
+        subIndicatorId: q.subIndicatorId,
+        category: q.category,
+        subIndicator: q.subIndicator,
+      })),
     };
   },
 });
 
-export const createMatch = mutation({
+export const createSession = mutation({
   args: {
-    players: v.array(v.string()),
-    mode: v.union(v.literal('FULL'), v.literal('CATEGORY'), v.literal('QUICK')),
-    indicatorIds: v.optional(v.array(v.string())),
-    levels: v.optional(v.array(v.number())),
+    title: v.optional(v.string()),
+    subIndicatorIds: v.optional(v.array(v.string())),
     questionCount: v.optional(v.number()),
-    allowRepeat: v.optional(v.boolean()),
     order: v.optional(v.string()),
-    durationSeconds: v.optional(v.number()),
     pointsCorrect: v.optional(v.number()),
-    showOptionsOnDisplay: v.optional(v.boolean()),
-    allowAnswerReveal: v.optional(v.boolean()),
-    bank: v.optional(v.union(v.literal('BASIC'), v.literal('ADVANCED'))),
+    pointsWrong: v.optional(v.number()),
+    pointsBlank: v.optional(v.number()),
+    showSubIndicator: v.optional(v.boolean()),
+    allowAnswerChange: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     await syncSeed(ctx);
 
-    if (!Array.isArray(args.players) || args.players.length !== 3) {
-      throw new Error('Pertandingan wajib diikuti tepat 3 peserta.');
-    }
-    const cleanNames = args.players.map((raw) =>
-      typeof raw === 'string' ? raw.replace(/[\u0000-\u001F\u007F]/g, '').replace(/\s+/g, ' ').trim() : '',
-    );
-    for (let i = 0; i < 3; i++) {
-      if (!cleanNames[i]) throw new Error(`Nama Peserta ${i + 1} tidak boleh kosong.`);
-      if (cleanNames[i].length > 40) throw new Error(`Nama Peserta ${i + 1} maksimal 40 karakter.`);
-    }
-    if (new Set(cleanNames.map((n) => n.toLowerCase())).size !== 3) {
-      throw new Error('Nama ketiga peserta harus unik.');
+    const cleanTitle = sanitizeName(args.title || 'Simulasi SKD — TIU CPNS') || 'Simulasi SKD — TIU CPNS';
+    if (cleanTitle.length > 80) {
+      throw new Error('Nama sesi maksimal 80 karakter.');
     }
 
-    const durationSeconds = args.durationSeconds ?? 20;
-    const pointsCorrect = args.pointsCorrect ?? 10;
-    const order = args.order === 'random' ? 'random' : 'sequential';
-    const showOptionsOnDisplay = args.showOptionsOnDisplay !== false;
-    const allowAnswerReveal = args.allowAnswerReveal !== false;
-    const allowRepeat = Boolean(args.allowRepeat);
+    const allSubs = await ctx.db.query('subIndicators').collect();
+    allSubs.sort((a, b) => a.sortOrder - b.sortOrder);
+    const validSubSet = new Set(allSubs.map((s) => s.id));
 
-    const allIndicators = await ctx.db.query('indicators').collect();
-    allIndicators.sort((a, b) => a.sortOrder - b.sortOrder);
-    const validIndSet = new Set(allIndicators.map((i) => i.id));
+    const subIndicatorIds =
+      Array.isArray(args.subIndicatorIds) && args.subIndicatorIds.length > 0
+        ? [...new Set(args.subIndicatorIds.filter((id) => validSubSet.has(id)))]
+        : allSubs.map((s) => s.id);
 
-    let indicatorIds: string[];
-    if (args.mode === 'FULL') {
-      indicatorIds = allIndicators.map((i) => i.id);
-    } else if (args.mode === 'CATEGORY') {
-      if (!Array.isArray(args.indicatorIds) || args.indicatorIds.length === 0) {
-        throw new Error('Pilih minimal satu indikator untuk Category Challenge.');
-      }
-      indicatorIds = [...new Set(args.indicatorIds)];
-      for (const id of indicatorIds) {
-        if (!validIndSet.has(id)) throw new Error(`Indikator tidak dikenal: ${id}`);
-      }
-    } else {
-      indicatorIds =
-        Array.isArray(args.indicatorIds) && args.indicatorIds.length > 0
-          ? [...new Set(args.indicatorIds.filter((id) => validIndSet.has(id)))]
-          : allIndicators.map((i) => i.id);
+    if (subIndicatorIds.length === 0) {
+      throw new Error('Pilih minimal satu subindikator TIU.');
     }
 
-    const levels =
-      args.mode === 'FULL'
-        ? [1, 2, 3]
-        : Array.isArray(args.levels) && args.levels.length > 0
-          ? [...new Set(args.levels.filter((l) => [1, 2, 3].includes(l)))].sort()
-          : [1, 2, 3];
+    const allQs = (await ctx.db.query('questionBank').collect()).filter((q) => q.isActive);
+    const subSet = new Set(subIndicatorIds);
+    const pool = allQs
+      .filter((q) => subSet.has(q.subIndicatorId))
+      .sort((a, b) => a.id.localeCompare(b.id));
 
-    const bank = args.bank === 'ADVANCED' ? 'ADVANCED' : 'BASIC';
-    const allQ = await ctx.db.query('questions').collect();
-    const indIdSet = new Set(indicatorIds);
-    const lvlSet = new Set(levels);
-    const pool = allQ.filter(
-      (q) => q.isActive && (q.bank ?? 'BASIC') === bank && indIdSet.has(q.indicatorId) && lvlSet.has(q.level),
-    );
-
-    if (pool.length === 0) throw new Error('Tidak ada soal yang tersedia untuk filter yang dipilih.');
-
-    let selectedIds: string[];
-    if (args.mode === 'QUICK') {
-      const requested = args.questionCount ?? Math.min(10, pool.length);
-      if (!allowRepeat && requested > pool.length) {
-        throw new Error(`Jumlah soal (${requested}) melebihi bank tersedia (${pool.length}).`);
-      }
-      selectedIds = [];
-      let lastId = '';
-      while (selectedIds.length < requested) {
-        const batch = order === 'random' ? shuffleArray(pool.map((p) => p.id)) : pool.map((p) => p.id);
-        if (batch.length > 1 && batch[0] === lastId) {
-          [batch[0], batch[1]] = [batch[1], batch[0]];
-        }
-        const needed = requested - selectedIds.length;
-        const slice = batch.slice(0, needed);
-        selectedIds.push(...slice);
-        lastId = slice[slice.length - 1];
-      }
-    } else {
-      const ids = pool.map((p) => p.id);
-      selectedIds = order === 'random' ? shuffleArray(ids) : ids;
+    if (pool.length === 0) {
+      throw new Error('Tidak ada soal TIU yang tersedia untuk filter subindikator tersebut.');
     }
 
-    let roomCode = '';
-    for (let attempt = 0; attempt < 20; attempt++) {
+    const order: 'sequential' | 'random' = args.order === 'random' ? 'random' : 'sequential';
+    const orderedPool = order === 'random' ? shuffleArray(pool) : pool;
+
+    const requestedCount =
+      args.questionCount !== undefined ? Math.floor(Number(args.questionCount)) : orderedPool.length;
+    if (requestedCount < 1) {
+      throw new Error('Jumlah soal minimal 1.');
+    }
+    if (requestedCount > orderedPool.length) {
+      throw new Error(
+        `Jumlah soal yang diminta (${requestedCount}) melebihi ketersediaan bank pada subindikator terpilih (${orderedPool.length} soal).`,
+      );
+    }
+
+    const selectedQuestions = orderedPool.slice(0, requestedCount);
+    const questionIds = selectedQuestions.map((q) => q.id);
+
+    let joinCode = '';
+    for (let attempt = 0; attempt < 25; attempt++) {
       const candidate = randomCode(6);
       const exists = await ctx.db
-        .query('matches')
-        .withIndex('by_roomCode', (q) => q.eq('roomCode', candidate))
+        .query('sessions')
+        .withIndex('by_joinCode', (q) => q.eq('joinCode', candidate))
         .first();
       if (!exists) {
-        roomCode = candidate;
+        joinCode = candidate;
         break;
       }
     }
-    if (!roomCode) throw new Error('Gagal membuat kode ruang unik.');
+    if (!joinCode) {
+      throw new Error('Gagal membuat kode sesi unik. Silakan coba lagi.');
+    }
 
-    const controllerToken = generateControllerToken();
-    const controllerTokenHash = await hashToken(controllerToken);
+    const hostToken = generateSecretToken('HOST');
+    const hostTokenHash = await hashToken(hostToken);
     const now = Date.now();
-    const durationMs = durationSeconds * 1000;
 
-    const matchId = await ctx.db.insert('matches', {
-      roomCode,
-      controllerTokenHash,
-      status: 'LOBBY',
-      mode: args.mode,
+    const pointsCorrect = args.pointsCorrect ?? 5;
+    const pointsWrong = args.pointsWrong ?? 0;
+    const pointsBlank = args.pointsBlank ?? 0;
+    const showSubIndicator = args.showSubIndicator !== false;
+    const allowAnswerChange = Boolean(args.allowAnswerChange);
+
+    const sessionId = await ctx.db.insert('sessions', {
+      joinCode,
+      title: cleanTitle,
+      hostTokenHash,
+      status: 'waiting',
+      joinOpen: true,
       settings: {
-        durationSeconds,
         pointsCorrect,
+        pointsWrong,
+        pointsBlank,
         order,
-        showOptionsOnDisplay,
-        allowAnswerReveal,
-        indicatorIds,
-        levels,
-        questionCount: selectedIds.length,
-        allowRepeat,
-        bank,
+        showSubIndicator,
+        allowAnswerChange,
+        subIndicatorIds,
+        questionCount: questionIds.length,
       },
-      currentQuestionIndex: 0,
-      currentQuestionId: selectedIds[0],
+      questionIds,
+      reviewQuestionIndex: 0,
       createdAt: now,
     });
 
-    for (let i = 0; i < 3; i++) {
-      await ctx.db.insert('matchPlayers', {
-        matchId,
-        seatNumber: i + 1,
-        displayName: cleanNames[i],
-        score: 0,
-        themeColor: PLAYER_COLORS[i],
+    for (let i = 0; i < questionIds.length; i++) {
+      await ctx.db.insert('sessionQuestions', {
+        sessionId,
+        questionId: questionIds[i],
+        sequenceNumber: i + 1,
       });
     }
 
-    for (let idx = 0; idx < selectedIds.length; idx++) {
-      await ctx.db.insert('matchQuestions', {
-        matchId,
-        questionId: selectedIds[idx],
-        sequenceNumber: idx + 1,
-        status: 'PENDING',
-        remainingMs: durationMs,
-        deadlineAt: undefined,
-        attemptedPlayerIds: [],
-        selectedPlayerId: undefined,
-        result: undefined,
-        answerRevealed: false,
-      });
-    }
-
-    await ctx.db.insert('matchEvents', {
-      matchId,
-      eventType: 'MATCH_CREATED',
-      payload: { mode: args.mode, questionCount: selectedIds.length },
+    await ctx.db.insert('sessionEvents', {
+      sessionId,
+      eventType: 'SESSION_CREATED',
+      payload: {
+        title: cleanTitle,
+        questionCount: questionIds.length,
+        subIndicatorCount: subIndicatorIds.length,
+      },
       createdAt: now,
     });
 
     return {
-      matchId,
-      roomCode,
-      controllerToken,
+      sessionId: String(sessionId),
+      joinCode,
+      hostToken,
+      questionCount: questionIds.length,
     };
   },
 });
 
-export const getSnapshot = query({
+async function requireSessionByCode(ctx: QueryCtx | MutationCtx, rawCode: string) {
+  const code = (rawCode || '').trim().toUpperCase();
+  const session = await ctx.db
+    .query('sessions')
+    .withIndex('by_joinCode', (q) => q.eq('joinCode', code))
+    .first();
+  if (!session) {
+    throw new Error(`Sesi dengan kode "${code}" tidak ditemukan.`);
+  }
+  return session;
+}
+
+async function requireHostAuth(ctx: MutationCtx, rawCode: string, hostToken: string) {
+  const session = await requireSessionByCode(ctx, rawCode);
+  const incomingHash = await hashToken(hostToken || '');
+  if (!hostToken || incomingHash !== session.hostTokenHash) {
+    throw new Error('Otorisasi Host tidak valid untuk sesi ini.');
+  }
+  return session;
+}
+
+export const verifyHostToken = mutation({
   args: {
-    roomCode: v.string(),
-    role: v.union(v.literal('display'), v.literal('controller')),
+    joinCode: v.string(),
+    hostToken: v.string(),
   },
   handler: async (ctx, args) => {
-    const code = args.roomCode.trim().toUpperCase();
-    const match = await ctx.db
-      .query('matches')
-      .withIndex('by_roomCode', (q) => q.eq('roomCode', code))
-      .first();
-
-    if (!match) return null;
-
-    const rawPlayers = await ctx.db
-      .query('matchPlayers')
-      .withIndex('by_match', (q) => q.eq('matchId', match._id))
-      .collect();
-
-    const { bySeat, standings } = computeStandings(rawPlayers);
-    const allMatchQuestions = await ctx.db
-      .query('matchQuestions')
-      .withIndex('by_match', (q) => q.eq('matchId', match._id))
-      .collect();
-    allMatchQuestions.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-
-    let currentQuestion: Record<string, unknown> | null = null;
-    const now = Date.now();
-
-    if (match.status !== 'LOBBY') {
-      const currentSeq = match.currentQuestionIndex + 1;
-      const mq = allMatchQuestions.find((q) => q.sequenceNumber === currentSeq);
-
-      if (mq) {
-        const questionDef = await ctx.db
-          .query('questions')
-          .withIndex('by_question_id', (q) => q.eq('id', mq.questionId))
-          .first();
-
-        const rawAttempts = await ctx.db
-          .query('answerAttempts')
-          .withIndex('by_match_question', (q) => q.eq('matchQuestionId', mq._id))
-          .collect();
-        rawAttempts.sort((a, b) => a.createdAt - b.createdAt);
-
-        const attempts = rawAttempts.map((a) => {
-          const p = rawPlayers.find((pl) => pl._id === a.playerId);
-          return {
-            id: a._id,
-            playerId: a.playerId,
-            playerName: p ? p.displayName : 'Peserta',
-            seatNumber: p ? p.seatNumber : 1,
-            result: a.result,
-            pointsAwarded: a.pointsAwarded,
-            createdAt: a.createdAt,
-          };
-        });
-
-        const isController = args.role === 'controller';
-        const isPending = mq.status === 'PENDING';
-        const isFinished = match.status === 'QUESTION_FINISHED' || match.status === 'MATCH_FINISHED';
-        const revealed = mq.answerRevealed && match.settings.allowAnswerReveal && isFinished;
-
-        const showQuestionText = isController || !isPending;
-        const showOptions = isController || (!isPending && (match.settings.showOptionsOnDisplay || revealed));
-        const showAnswerKey = isController || revealed;
-
-        const liveRemainingMs =
-          match.status === 'RUNNING' && typeof mq.deadlineAt === 'number'
-            ? Math.max(0, mq.deadlineAt - now)
-            : mq.remainingMs;
-
-        currentQuestion = {
-          matchQuestionId: mq._id,
-          questionId: mq.questionId,
-          sequenceNumber: mq.sequenceNumber,
-          totalQuestions: allMatchQuestions.length,
-          indicatorId: questionDef?.indicatorId,
-          category: questionDef?.category,
-          topic: questionDef?.topic,
-          level: questionDef?.level,
-          difficulty: questionDef?.difficulty,
-          status: mq.status,
-          result: mq.result,
-          remainingMs: liveRemainingMs,
-          deadlineAt: mq.deadlineAt,
-          selectedPlayerId: mq.selectedPlayerId,
-          attemptedPlayerIds: mq.attemptedPlayerIds,
-          answerRevealed: mq.answerRevealed,
-          questionText: showQuestionText ? questionDef?.question : null,
-          options: showOptions ? questionDef?.options : null,
-          correctOption: showAnswerKey ? questionDef?.correctOption : null,
-          explanation: showAnswerKey ? questionDef?.explanation : null,
-          attempts,
-        };
-      }
-    }
-
-    const adjustEvents = await ctx.db
-      .query('matchEvents')
-      .withIndex('by_match', (q) => q.eq('matchId', match._id))
-      .filter((q) => q.eq(q.field('eventType'), 'SCORE_ADJUSTED'))
-      .collect();
-    adjustEvents.sort((a, b) => b.createdAt - a.createdAt);
-
-    return {
-      role: args.role,
-      serverNow: now,
-      match: {
-        id: match._id,
-        roomCode: match.roomCode,
-        status: match.status,
-        mode: match.mode,
-        settings: match.settings,
-        currentQuestionIndex: match.currentQuestionIndex,
-        totalQuestions: allMatchQuestions.length,
-        createdAt: match.createdAt,
-        startedAt: match.startedAt,
-        finishedAt: match.finishedAt,
-      },
-      players: bySeat.map((p) => ({
-        id: p._id,
-        seatNumber: p.seatNumber,
-        displayName: p.displayName,
-        score: p.score,
-        themeColor: p.themeColor,
-      })),
-      standings: standings.map((p) => ({
-        id: p._id,
-        seatNumber: p.seatNumber,
-        displayName: p.displayName,
-        score: p.score,
-        themeColor: p.themeColor,
-        rank: p.rank,
-        isTied: p.isTied,
-      })),
-      currentQuestion,
-      scoreAdjustments: adjustEvents.map((ev) => ({
-        id: ev._id,
-        createdAt: ev.createdAt,
-        ...ev.payload,
-      })),
-    };
+    const session = await requireHostAuth(ctx, args.joinCode, args.hostToken);
+    return { valid: true, joinCode: session.joinCode, status: session.status };
   },
 });
 
-export const verifyToken = mutation({
+export const joinSession = mutation({
   args: {
-    roomCode: v.string(),
-    token: v.string(),
+    joinCode: v.string(),
+    displayName: v.optional(v.string()),
+    participantToken: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const code = args.roomCode.trim().toUpperCase();
-    const match = await ctx.db
-      .query('matches')
-      .withIndex('by_roomCode', (q) => q.eq('roomCode', code))
-      .first();
-    if (!match) throw new Error('Ruang tidak ditemukan.');
+    const session = await requireSessionByCode(ctx, args.joinCode);
 
-    const expected = match.controllerTokenHash;
-    const actual = await hashToken(args.token);
-    if (expected !== actual) throw new Error('Token controller tidak valid.');
-
-    return { valid: true };
-  },
-});
-
-export const dispatchAction = mutation({
-  args: {
-    roomCode: v.string(),
-    token: v.string(),
-    action: v.object({
-      type: v.string(),
-      actionId: v.optional(v.string()),
-      playerId: v.optional(v.string()),
-      delta: v.optional(v.number()),
-      reason: v.optional(v.string()),
-      reveal: v.optional(v.boolean()),
-    }),
-  },
-  handler: async (ctx, args) => {
-    const code = args.roomCode.trim().toUpperCase();
-    const match = await ctx.db
-      .query('matches')
-      .withIndex('by_roomCode', (q) => q.eq('roomCode', code))
-      .first();
-    if (!match) throw new Error('Ruang tidak ditemukan.');
-
-    const actual = await hashToken(args.token);
-    if (match.controllerTokenHash !== actual) throw new Error('Token controller tidak valid.');
-
-    const action = args.action;
-    const now = Date.now();
-
-    // Idempotency: duplicate actionId returns without double mutation
-    if (action.actionId) {
-      const dup = await ctx.db
-        .query('matchEvents')
-        .withIndex('by_match_action', (q) => q.eq('matchId', match._id).eq('actionId', action.actionId))
-        .first();
-      if (dup) return { eventType: dup.eventType };
-    }
-
-    if (match.status === 'MATCH_FINISHED') {
-      throw new Error('Pertandingan sudah selesai.');
-    }
-
-    const currentSeq = match.currentQuestionIndex + 1;
-    const mq = await ctx.db
-      .query('matchQuestions')
-      .withIndex('by_match_seq', (q) => q.eq('matchId', match._id).eq('sequenceNumber', currentSeq))
-      .first();
-
-    let emittedEvent = action.type;
-
-    switch (action.type) {
-      case 'START_MATCH': {
-        if (match.status !== 'LOBBY') throw new Error('Pertandingan hanya dapat dimulai dari LOBBY.');
-        await ctx.db.patch(match._id, {
-          status: 'READY',
-          startedAt: now,
-          currentQuestionIndex: 0,
-        });
-        emittedEvent = 'MATCH_STARTED';
-        break;
-      }
-
-      case 'START_QUESTION': {
-        if (match.status !== 'READY' || !mq) throw new Error('Soal hanya dapat dimulai saat status READY.');
-        const deadlineAt = now + mq.remainingMs;
-        await ctx.db.patch(mq._id, { status: 'RUNNING', deadlineAt });
-        await ctx.db.patch(match._id, { status: 'RUNNING' });
-        emittedEvent = 'QUESTION_STARTED';
-        break;
-      }
-
-      case 'SELECT_PLAYER': {
-        if (match.status !== 'RUNNING' || !mq) throw new Error('Pilih peserta saat timer berjalan.');
-        if (!action.playerId) throw new Error('PlayerId wajib ada.');
-        if (mq.attemptedPlayerIds.includes(action.playerId)) {
-          throw new Error('Peserta ini sudah menjawab salah.');
-        }
-        const remainingMs = Math.max(0, (mq.deadlineAt ?? now) - now);
-        await ctx.db.patch(mq._id, {
-          status: 'ANSWERING',
-          remainingMs,
-          deadlineAt: undefined,
-          selectedPlayerId: action.playerId,
-        });
-        await ctx.db.patch(match._id, { status: 'ANSWERING' });
-        emittedEvent = 'PLAYER_SELECTED';
-        break;
-      }
-
-      case 'CANCEL_SELECTION': {
-        if (match.status !== 'ANSWERING' || !mq) throw new Error('Tidak ada pemilihan aktif.');
-        const nextQStatus = mq.attemptedPlayerIds.length > 0 ? 'WRONG_RETRY' : 'RUNNING';
-        const deadlineAt = now + mq.remainingMs;
-        await ctx.db.patch(mq._id, {
-          status: nextQStatus,
-          deadlineAt,
-          selectedPlayerId: undefined,
-        });
-        await ctx.db.patch(match._id, { status: 'RUNNING' });
-        emittedEvent = 'PLAYER_SELECTION_CANCELLED';
-        break;
-      }
-
-      case 'JUDGE_CORRECT': {
-        if (match.status !== 'ANSWERING' || !mq || !mq.selectedPlayerId) {
-          throw new Error('Penilaian BENAR hanya saat peserta menjawab.');
-        }
-        const pts = match.settings.pointsCorrect;
-        const attempted = [...new Set([...mq.attemptedPlayerIds, mq.selectedPlayerId])];
-
-        const player = await ctx.db.get(mq.selectedPlayerId as any);
-        if (player) {
-          await ctx.db.patch(player._id, { score: (player as any).score + pts });
-        }
-
-        await ctx.db.insert('answerAttempts', {
-          matchQuestionId: mq._id,
-          playerId: mq.selectedPlayerId,
-          result: 'CORRECT',
-          pointsAwarded: pts,
-          createdAt: now,
-        });
-
-        await ctx.db.patch(mq._id, {
-          status: 'FINISHED',
-          result: 'CORRECT',
-          deadlineAt: undefined,
-          attemptedPlayerIds: attempted,
-        });
-        await ctx.db.patch(match._id, { status: 'QUESTION_FINISHED' });
-        emittedEvent = 'ANSWER_CORRECT';
-        break;
-      }
-
-      case 'JUDGE_WRONG': {
-        if (match.status !== 'ANSWERING' || !mq || !mq.selectedPlayerId) {
-          throw new Error('Penilaian SALAH hanya saat peserta menjawab.');
-        }
-        const attempted = [...new Set([...mq.attemptedPlayerIds, mq.selectedPlayerId])];
-
-        await ctx.db.insert('answerAttempts', {
-          matchQuestionId: mq._id,
-          playerId: mq.selectedPlayerId,
-          result: 'WRONG',
-          pointsAwarded: 0,
-          createdAt: now,
-        });
-
-        if (attempted.length < 3 && mq.remainingMs > 0) {
-          const deadlineAt = now + mq.remainingMs;
-          await ctx.db.patch(mq._id, {
-            status: 'WRONG_RETRY',
-            deadlineAt,
-            selectedPlayerId: undefined,
-            attemptedPlayerIds: attempted,
-          });
-          await ctx.db.patch(match._id, { status: 'RUNNING' });
-        } else {
-          const finalResult = attempted.length >= 3 ? 'ALL_WRONG' : 'TIMEOUT';
-          await ctx.db.patch(mq._id, {
-            status: 'FINISHED',
-            result: finalResult,
-            deadlineAt: undefined,
-            selectedPlayerId: undefined,
-            attemptedPlayerIds: attempted,
-          });
-          await ctx.db.patch(match._id, { status: 'QUESTION_FINISHED' });
-        }
-        emittedEvent = 'ANSWER_WRONG';
-        break;
-      }
-
-      case 'PAUSE_MATCH': {
-        if (match.status !== 'RUNNING' || !mq) throw new Error('Hanya bisa dijeda saat timer berjalan.');
-        const remainingMs = Math.max(0, (mq.deadlineAt ?? now) - now);
-        await ctx.db.patch(mq._id, { remainingMs, deadlineAt: undefined });
-        await ctx.db.patch(match._id, { status: 'PAUSED' });
-        emittedEvent = 'MATCH_PAUSED';
-        break;
-      }
-
-      case 'RESUME_MATCH': {
-        if (match.status !== 'PAUSED' || !mq) throw new Error('Pertandingan tidak sedang dijeda.');
-        const nextQStatus = mq.attemptedPlayerIds.length > 0 ? 'WRONG_RETRY' : 'RUNNING';
-        const deadlineAt = now + mq.remainingMs;
-        await ctx.db.patch(mq._id, { status: nextQStatus, deadlineAt });
-        await ctx.db.patch(match._id, { status: 'RUNNING' });
-        emittedEvent = 'MATCH_RESUMED';
-        break;
-      }
-
-      case 'REVEAL_ANSWER': {
-        if (match.status !== 'QUESTION_FINISHED' || !mq) throw new Error('Hanya setelah soal selesai.');
-        const nextVal = typeof action.reveal === 'boolean' ? action.reveal : !mq.answerRevealed;
-        await ctx.db.patch(mq._id, { answerRevealed: nextVal });
-        emittedEvent = 'ANSWER_REVEALED';
-        break;
-      }
-
-      case 'NEXT_QUESTION': {
-        if (match.status !== 'QUESTION_FINISHED') throw new Error('Selesaikan soal saat ini dulu.');
-        const nextIdx = match.currentQuestionIndex + 1;
-        const allMqs = await ctx.db
-          .query('matchQuestions')
-          .withIndex('by_match', (q) => q.eq('matchId', match._id))
-          .collect();
-
-        if (nextIdx < allMqs.length) {
-          const nextMq = allMqs.find((q) => q.sequenceNumber === nextIdx + 1);
-          await ctx.db.patch(match._id, {
-            status: 'READY',
-            currentQuestionIndex: nextIdx,
-            currentQuestionId: nextMq?.questionId,
-          });
-          emittedEvent = 'NEXT_QUESTION';
-        } else {
-          await ctx.db.patch(match._id, {
-            status: 'MATCH_FINISHED',
-            finishedAt: now,
-          });
-          emittedEvent = 'MATCH_FINISHED';
-        }
-        break;
-      }
-
-      case 'ADJUST_SCORE': {
-        if (!action.playerId || typeof action.delta !== 'number' || action.delta === 0) {
-          throw new Error('Perubahan skor tidak valid.');
-        }
-        const reason = (action.reason || '').trim();
-        if (reason.length < 3) throw new Error('Alasan koreksi skor wajib diisi.');
-
-        const player = await ctx.db.get(action.playerId as any);
-        if (!player) throw new Error('Peserta tidak ditemukan.');
-        const newScore = (player as any).score + action.delta;
-        if (newScore < 0) throw new Error('Skor tidak boleh negatif.');
-
-        await ctx.db.patch(player._id, { score: newScore });
-        await ctx.db.insert('matchEvents', {
-          matchId: match._id,
-          actionId: action.actionId,
-          eventType: 'SCORE_ADJUSTED',
-          payload: {
-            playerId: player._id,
-            playerName: (player as any).displayName,
-            oldScore: (player as any).score,
-            newScore,
-            delta: action.delta,
-            reason,
-          },
-          createdAt: now,
-        });
-        return { eventType: 'SCORE_ADJUSTED' };
-      }
-
-      case 'END_MATCH': {
-        if (mq && !['FINISHED', 'TIMEOUT', 'PENDING'].includes(mq.status)) {
-          const rem = match.status === 'RUNNING' ? Math.max(0, (mq.deadlineAt ?? now) - now) : mq.remainingMs;
-          await ctx.db.patch(mq._id, {
-            status: 'FINISHED',
-            result: mq.result || 'ABORTED',
-            remainingMs: rem,
-            deadlineAt: undefined,
-            selectedPlayerId: undefined,
-          });
-        }
-        await ctx.db.patch(match._id, {
-          status: 'MATCH_FINISHED',
-          finishedAt: now,
-        });
-        emittedEvent = 'MATCH_FINISHED';
-        break;
-      }
-
-      default:
-        throw new Error('Aksi tidak dikenal.');
-    }
-
-    await ctx.db.insert('matchEvents', {
-      matchId: match._id,
-      actionId: action.actionId,
-      eventType: emittedEvent,
-      payload: {},
-      createdAt: now,
-    });
-
-    return { eventType: emittedEvent };
-  },
-});
-
-export const listHistory = query({
-  args: { dateFilter: v.optional(v.string()) },
-  handler: async (ctx, args) => {
-    const matches = await ctx.db.query('matches').collect();
-    matches.sort((a, b) => b.createdAt - a.createdAt);
-
-    const result = [];
-    for (const m of matches) {
-      if (args.dateFilter && /^\d{4}-\d{2}-\d{2}$/.test(args.dateFilter)) {
-        const d = new Date(m.createdAt);
-        const local = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-        if (local !== args.dateFilter) continue;
-      }
-
-      const players = await ctx.db
-        .query('matchPlayers')
-        .withIndex('by_match', (q) => q.eq('matchId', m._id))
-        .collect();
-      const { standings } = computeStandings(players);
-
-      result.push({
-        id: m._id,
-        roomCode: m.roomCode,
-        status: m.status,
-        mode: m.mode,
-        questionCount: m.settings.questionCount,
-        durationSeconds: m.settings.durationSeconds,
-        pointsCorrect: m.settings.pointsCorrect,
-        createdAt: m.createdAt,
-        startedAt: m.startedAt,
-        finishedAt: m.finishedAt,
-        standings: standings.map((p) => ({
-          displayName: p.displayName,
-          score: p.score,
-          themeColor: p.themeColor,
-          rank: p.rank,
-          isTied: p.isTied,
-        })),
-      });
-    }
-
-    return result;
-  },
-});
-
-export const getHistoryDetail = query({
-  args: { matchId: v.string() },
-  handler: async (ctx, args) => {
-    let match = await ctx.db
-      .query('matches')
-      .withIndex('by_roomCode', (q) => q.eq('roomCode', args.matchId.toUpperCase()))
-      .first();
-    if (!match) {
-      try {
-        match = await ctx.db.get(args.matchId as any);
-      } catch { /* ignore */ }
-    }
-    if (!match) throw new Error('Data riwayat tidak ditemukan.');
-
-    const players = await ctx.db
-      .query('matchPlayers')
-      .withIndex('by_match', (q) => q.eq('matchId', match._id))
-      .collect();
-    const { bySeat, standings } = computeStandings(players);
-
-    const mqs = await ctx.db
-      .query('matchQuestions')
-      .withIndex('by_match', (q) => q.eq('matchId', match._id))
-      .collect();
-    mqs.sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-
-    const isMatchFinished = match.status === 'MATCH_FINISHED';
-
-    const questions = [];
-    for (const mq of mqs) {
-      const qDef = await ctx.db
-        .query('questions')
-        .withIndex('by_question_id', (q) => q.eq('id', mq.questionId))
+    // 1. Check session recovery by participantToken first (prevents duplicate identity on refresh)
+    if (args.participantToken) {
+      const tokHash = await hashToken(args.participantToken);
+      const existingByToken = await ctx.db
+        .query('participants')
+        .withIndex('by_session_token', (q) =>
+          q.eq('sessionId', session._id).eq('participantTokenHash', tokHash),
+        )
         .first();
 
-      const rawAttempts = await ctx.db
-        .query('answerAttempts')
-        .withIndex('by_match_question', (q) => q.eq('matchQuestionId', mq._id))
-        .collect();
-
-      const attempts = rawAttempts.map((a) => {
-        const p = players.find((pl) => pl._id === a.playerId);
+      if (existingByToken) {
         return {
-          playerName: p ? p.displayName : 'Peserta',
-          result: a.result,
-          pointsAwarded: a.pointsAwarded,
-          createdAt: a.createdAt,
+          participantId: String(existingByToken._id),
+          displayName: existingByToken.displayName,
+          participantToken: args.participantToken,
+          joinCode: session.joinCode,
+          recovered: true,
         };
-      });
-
-      questions.push({
-        sequenceNumber: mq.sequenceNumber,
-        questionId: mq.questionId,
-        category: qDef?.category,
-        topic: qDef?.topic,
-        level: qDef?.level,
-        difficulty: qDef?.difficulty,
-        status: mq.status,
-        result: mq.result,
-        questionText: isMatchFinished ? qDef?.question : null,
-        correctOption: isMatchFinished ? qDef?.correctOption : null,
-        explanation: isMatchFinished ? qDef?.explanation : null,
-        attempts,
-      });
+      }
     }
 
-    const adjustEvents = await ctx.db
-      .query('matchEvents')
-      .withIndex('by_match', (q) => q.eq('matchId', match._id))
-      .filter((q) => q.eq(q.field('eventType'), 'SCORE_ADJUSTED'))
+    // 2. New participant registration
+    const baseName = sanitizeName(args.displayName || '');
+    if (!baseName) {
+      throw new Error('Nama peserta wajib diisi sebelum memulai simulasi.');
+    }
+    if (baseName.length > 40) {
+      throw new Error('Nama peserta maksimal 40 karakter.');
+    }
+
+    if (!session.joinOpen) {
+      throw new Error('Akses bergabung untuk sesi ini sedang ditutup oleh Host.');
+    }
+    if (session.status === 'completed' || session.status === 'review_open') {
+      throw new Error('Sesi simulasi ini sudah selesai dan tidak menerima peserta baru.');
+    }
+
+    const existingParticipants = await ctx.db
+      .query('participants')
+      .withIndex('by_session', (q) => q.eq('sessionId', session._id))
       .collect();
 
+    // Handle duplicate display names consistently: "Andi", "Andi (2)", "Andi (3)"
+    const takenNames = new Set(existingParticipants.map((p) => p.displayName.toLowerCase()));
+    let finalName = baseName;
+    let suffix = 2;
+    while (takenNames.has(finalName.toLowerCase())) {
+      finalName = `${baseName} (${suffix})`;
+      suffix++;
+    }
+
+    const participantToken = generateSecretToken('PESERTA');
+    const participantTokenHash = await hashToken(participantToken);
+    const now = Date.now();
+    const initialStatus = session.status === 'in_progress' ? 'working' : 'joined';
+
+    const participantId = await ctx.db.insert('participants', {
+      sessionId: session._id,
+      displayName: finalName,
+      normalizedName: baseName.toLowerCase(),
+      participantTokenHash,
+      status: initialStatus,
+      currentQuestionIndex: 0,
+      answeredCount: 0,
+      correctCount: 0,
+      wrongCount: 0,
+      score: 0,
+      accuracy: 0,
+      joinedAt: now,
+    });
+
+    await ctx.db.insert('sessionEvents', {
+      sessionId: session._id,
+      eventType: 'PARTICIPANT_JOINED',
+      payload: { participantId: String(participantId), displayName: finalName },
+      createdAt: now,
+    });
+
     return {
-      id: match._id,
-      roomCode: match.roomCode,
-      status: match.status,
-      mode: match.mode,
-      settings: match.settings,
-      createdAt: match.createdAt,
-      startedAt: match.startedAt,
-      finishedAt: match.finishedAt,
-      players: bySeat,
-      standings,
-      questions,
-      scoreAdjustments: adjustEvents.map((ev) => ({
-        id: ev._id,
-        createdAt: ev.createdAt,
-        ...ev.payload,
-      })),
+      participantId: String(participantId),
+      displayName: finalName,
+      participantToken,
+      joinCode: session.joinCode,
+      recovered: false,
     };
   },
 });
 
-export const deleteHistory = mutation({
-  args: { matchId: v.string() },
+async function recalculateParticipantStats(
+  ctx: MutationCtx,
+  session: any,
+  participant: any,
+  markFinished: boolean,
+) {
+  const answers = await ctx.db
+    .query('participantAnswers')
+    .withIndex('by_participant', (q) => q.eq('participantId', participant._id))
+    .collect();
+
+  const totalQuestions = session.questionIds.length;
+  const answeredCount = answers.length;
+  const correctCount = answers.filter((a) => a.isCorrect).length;
+  const wrongCount = answeredCount - correctCount;
+  const unansweredCount = Math.max(0, totalQuestions - answeredCount);
+  const score =
+    answers.reduce((sum, a) => sum + a.pointsAwarded, 0) +
+    (markFinished ? unansweredCount * (session.settings.pointsBlank ?? 0) : 0);
+  const accuracy =
+    totalQuestions > 0 ? Math.round((correctCount / totalQuestions) * 1000) / 10 : 0;
+
+  const answeredSet = new Set(answers.map((a) => a.questionId));
+  let nextIdx = participant.currentQuestionIndex;
+  for (let i = 0; i < session.questionIds.length; i++) {
+    if (!answeredSet.has(session.questionIds[i])) {
+      nextIdx = i;
+      break;
+    }
+  }
+
+  const now = Date.now();
+  const isNowFinished =
+    markFinished ||
+    (answeredCount >= totalQuestions && !session.settings.allowAnswerChange);
+
+  const nextStatus = isNowFinished ? 'finished' : 'working';
+
+  await ctx.db.patch(participant._id, {
+    status: nextStatus,
+    currentQuestionIndex: nextIdx,
+    answeredCount,
+    correctCount,
+    wrongCount,
+    score,
+    accuracy,
+    finishedAt: isNowFinished ? participant.finishedAt ?? now : undefined,
+  });
+
+  if (isNowFinished && participant.status !== 'finished') {
+    await ctx.db.insert('sessionEvents', {
+      sessionId: session._id,
+      eventType: 'PARTICIPANT_FINISHED',
+      payload: {
+        participantId: String(participant._id),
+        displayName: participant.displayName,
+      },
+      createdAt: now,
+    });
+
+    // Check if ALL registered participants have now finished the package
+    const allParts = await ctx.db
+      .query('participants')
+      .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+      .collect();
+
+    if (
+      allParts.length > 0 &&
+      allParts.every((p) => (p._id === participant._id ? true : p.status === 'finished')) &&
+      session.status === 'in_progress'
+    ) {
+      await ctx.db.patch(session._id, {
+        status: 'completed',
+        completedAt: now,
+      });
+      await ctx.db.insert('sessionEvents', {
+        sessionId: session._id,
+        eventType: 'SESSION_COMPLETED',
+        payload: { reason: 'ALL_PARTICIPANTS_FINISHED', participantCount: allParts.length },
+        createdAt: now,
+      });
+    }
+  }
+
+  return {
+    answeredCount,
+    totalQuestions,
+    status: nextStatus,
+    currentQuestionIndex: nextIdx,
+  };
+}
+
+export const submitAnswer = mutation({
+  args: {
+    joinCode: v.string(),
+    participantToken: v.string(),
+    questionId: v.string(),
+    selectedOption: v.union(
+      v.literal('A'),
+      v.literal('B'),
+      v.literal('C'),
+      v.literal('D'),
+      v.literal('E'),
+    ),
+    actionId: v.optional(v.string()),
+  },
   handler: async (ctx, args) => {
-    let match = await ctx.db.get(args.matchId as any);
-    if (!match) {
-      match = await ctx.db
-        .query('matches')
-        .withIndex('by_roomCode', (q) => q.eq('roomCode', args.matchId.toUpperCase()))
-        .first();
-    }
-    if (!match) throw new Error('Riwayat tidak ditemukan.');
-    if (!['MATCH_FINISHED', 'LOBBY'].includes(match.status)) {
-      throw new Error('Pertandingan masih berlangsung.');
+    const session = await requireSessionByCode(ctx, args.joinCode);
+    const tokHash = await hashToken(args.participantToken || '');
+    const participant = await ctx.db
+      .query('participants')
+      .withIndex('by_session_token', (q) =>
+        q.eq('sessionId', session._id).eq('participantTokenHash', tokHash),
+      )
+      .first();
+
+    if (!participant) {
+      throw new Error('Identitas peserta tidak ditemukan. Silakan bergabung ulang.');
     }
 
-    // Cascade delete
-    const players = await ctx.db
-      .query('matchPlayers')
-      .withIndex('by_match', (q) => q.eq('matchId', match._id))
-      .collect();
-    for (const p of players) await ctx.db.delete(p._id);
+    if (session.status === 'waiting') {
+      throw new Error('Sesi belum dimulai oleh Host. Tunggu hingga Host memulai sesi.');
+    }
+    if (session.status === 'completed' || session.status === 'review_open') {
+      throw new Error('Sesi telah berakhir. Jawaban tidak dapat dikirim lagi.');
+    }
+    if (participant.status === 'finished') {
+      throw new Error('Anda telah menyelesaikan seluruh paket soal pada sesi ini.');
+    }
 
-    const mqs = await ctx.db
-      .query('matchQuestions')
-      .withIndex('by_match', (q) => q.eq('matchId', match._id))
-      .collect();
-    for (const mq of mqs) {
-      const attempts = await ctx.db
-        .query('answerAttempts')
-        .withIndex('by_match_question', (q) => q.eq('matchQuestionId', mq._id))
+    if (!session.questionIds.includes(args.questionId)) {
+      throw new Error('Soal tidak terdaftar dalam sesi ini.');
+    }
+
+    const qDef = await ctx.db
+      .query('questionBank')
+      .withIndex('by_question_id', (q) => q.eq('id', args.questionId))
+      .first();
+    if (!qDef) {
+      throw new Error('Data soal tidak ditemukan di bank soal.');
+    }
+
+    const existingAns = await ctx.db
+      .query('participantAnswers')
+      .withIndex('by_participant_question', (q) =>
+        q.eq('participantId', participant._id).eq('questionId', args.questionId),
+      )
+      .first();
+
+    const isCorrect = qDef.correctOption === args.selectedOption;
+    const pointsAwarded = isCorrect
+      ? session.settings.pointsCorrect
+      : session.settings.pointsWrong;
+    const now = Date.now();
+
+    if (existingAns) {
+      if (!session.settings.allowAnswerChange) {
+        // Idempotent retry if the exact same option was re-sent after network hiccup
+        if (existingAns.selectedOption === args.selectedOption) {
+          return {
+            saved: true,
+            duplicateRetry: true,
+            answeredCount: participant.answeredCount,
+            totalQuestions: session.questionIds.length,
+            participantStatus: participant.status,
+          };
+        }
+        throw new Error('Jawaban untuk soal ini sudah dikunci dan tidak dapat diubah.');
+      }
+
+      await ctx.db.patch(existingAns._id, {
+        selectedOption: args.selectedOption,
+        isCorrect,
+        pointsAwarded,
+        submittedAt: now,
+      });
+    } else {
+      await ctx.db.insert('participantAnswers', {
+        sessionId: session._id,
+        participantId: participant._id,
+        questionId: args.questionId,
+        selectedOption: args.selectedOption,
+        isCorrect,
+        pointsAwarded,
+        submittedAt: now,
+      });
+    }
+
+    const updated = await recalculateParticipantStats(ctx, session, participant, false);
+
+    // Note: Do NOT return isCorrect, pointsAwarded, or correctOption to participant!
+    return {
+      saved: true,
+      duplicateRetry: false,
+      answeredCount: updated.answeredCount,
+      totalQuestions: updated.totalQuestions,
+      participantStatus: updated.status,
+      currentQuestionIndex: updated.currentQuestionIndex,
+    };
+  },
+});
+
+export const finishParticipantSession = mutation({
+  args: {
+    joinCode: v.string(),
+    participantToken: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const session = await requireSessionByCode(ctx, args.joinCode);
+    const tokHash = await hashToken(args.participantToken || '');
+    const participant = await ctx.db
+      .query('participants')
+      .withIndex('by_session_token', (q) =>
+        q.eq('sessionId', session._id).eq('participantTokenHash', tokHash),
+      )
+      .first();
+
+    if (!participant) {
+      throw new Error('Identitas peserta tidak ditemukan.');
+    }
+    if (participant.status === 'finished') {
+      return { finished: true };
+    }
+
+    await recalculateParticipantStats(ctx, session, participant, true);
+    return { finished: true };
+  },
+});
+
+export const hostDispatch = mutation({
+  args: {
+    joinCode: v.string(),
+    hostToken: v.string(),
+    action: v.any(),
+  },
+  handler: async (ctx, args) => {
+    const session = await requireHostAuth(ctx, args.joinCode, args.hostToken);
+    const action = args.action || {};
+    const type = String(action.type || '');
+    const now = Date.now();
+
+    if (type === 'START_SESSION') {
+      if (session.status !== 'waiting') {
+        return { ok: true, status: session.status };
+      }
+      await ctx.db.patch(session._id, {
+        status: 'in_progress',
+        startedAt: now,
+      });
+      const parts = await ctx.db
+        .query('participants')
+        .withIndex('by_session', (q) => q.eq('sessionId', session._id))
         .collect();
-      for (const a of attempts) await ctx.db.delete(a._id);
-      await ctx.db.delete(mq._id);
+      for (const p of parts) {
+        if (p.status === 'joined') {
+          await ctx.db.patch(p._id, { status: 'working' });
+        }
+      }
+      await ctx.db.insert('sessionEvents', {
+        sessionId: session._id,
+        eventType: 'SESSION_STARTED',
+        payload: { participantCount: parts.length },
+        createdAt: now,
+      });
+      return { ok: true, status: 'in_progress' };
     }
 
-    const events = await ctx.db
-      .query('matchEvents')
-      .withIndex('by_match', (q) => q.eq('matchId', match._id))
-      .collect();
-    for (const ev of events) await ctx.db.delete(ev._id);
+    if (type === 'TOGGLE_JOIN') {
+      const nextJoinOpen =
+        typeof action.joinOpen === 'boolean' ? action.joinOpen : !session.joinOpen;
+      if (
+        nextJoinOpen &&
+        (session.status === 'completed' || session.status === 'review_open')
+      ) {
+        throw new Error('Sesi yang sudah selesai tidak dapat dibuka kembali untuk peserta baru.');
+      }
+      await ctx.db.patch(session._id, { joinOpen: nextJoinOpen });
+      await ctx.db.insert('sessionEvents', {
+        sessionId: session._id,
+        eventType: 'JOIN_ACCESS_CHANGED',
+        payload: { joinOpen: nextJoinOpen },
+        createdAt: now,
+      });
+      return { ok: true, joinOpen: nextJoinOpen };
+    }
 
-    await ctx.db.delete(match._id);
-    return { success: true };
+    if (type === 'END_SESSION') {
+      if (session.status === 'completed' || session.status === 'review_open') {
+        return { ok: true, status: session.status };
+      }
+      const parts = await ctx.db
+        .query('participants')
+        .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+        .collect();
+      const unfinished = parts.filter((p) => p.status !== 'finished');
+
+      if (unfinished.length > 0 && !action.confirmUnfinished) {
+        const names = unfinished.map((p) => p.displayName).join(', ');
+        throw new Error(
+          `UNFINISHED_PARTICIPANTS: Masih ada ${unfinished.length} peserta yang belum selesai (${names}). Konfirmasi pengakhiran paksa jika ingin mengakhiri sesi sekarang.`,
+        );
+      }
+
+      for (const p of unfinished) {
+        await recalculateParticipantStats(ctx, session, p, true);
+      }
+
+      await ctx.db.patch(session._id, {
+        status: 'completed',
+        joinOpen: false,
+        completedAt: now,
+      });
+
+      await ctx.db.insert('sessionEvents', {
+        sessionId: session._id,
+        eventType: 'SESSION_COMPLETED',
+        payload: {
+          reason: unfinished.length > 0 ? 'HOST_FORCED_END' : 'HOST_ENDED',
+          unfinishedCount: unfinished.length,
+          unfinishedNames: unfinished.map((p) => p.displayName),
+        },
+        createdAt: now,
+      });
+
+      return { ok: true, status: 'completed' };
+    }
+
+    if (type === 'OPEN_REVIEW') {
+      if (session.status === 'review_open') {
+        return { ok: true, status: 'review_open' };
+      }
+
+      const parts = await ctx.db
+        .query('participants')
+        .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+        .collect();
+      const unfinished = parts.filter((p) => p.status !== 'finished');
+      const allFinished = parts.length > 0 && unfinished.length === 0;
+
+      if (session.status !== 'completed' && !allFinished) {
+        throw new Error(
+          'Pembahasan belum dapat dibuka. Seluruh peserta harus menyelesaikan simulasi atau Host harus mengakhiri sesi terlebih dahulu.',
+        );
+      }
+
+      await ctx.db.patch(session._id, {
+        status: 'review_open',
+        joinOpen: false,
+        completedAt: session.completedAt ?? now,
+        reviewOpenedAt: now,
+        reviewQuestionIndex: 0,
+      });
+
+      await ctx.db.insert('sessionEvents', {
+        sessionId: session._id,
+        eventType: 'REVIEW_OPENED',
+        payload: {
+          openedBy: 'HOST',
+          participantCount: parts.length,
+          openedAt: now,
+        },
+        createdAt: now,
+      });
+
+      return { ok: true, status: 'review_open' };
+    }
+
+    if (type === 'SET_REVIEW_QUESTION') {
+      if (session.status !== 'review_open') {
+        throw new Error('Mode pembahasan belum dibuka.');
+      }
+      const idx = Math.max(
+        0,
+        Math.min(session.questionIds.length - 1, Math.floor(Number(action.index ?? 0))),
+      );
+      await ctx.db.patch(session._id, { reviewQuestionIndex: idx });
+      await ctx.db.insert('sessionEvents', {
+        sessionId: session._id,
+        eventType: 'REVIEW_QUESTION_CHANGED',
+        payload: { reviewQuestionIndex: idx },
+        createdAt: now,
+      });
+      return { ok: true, reviewQuestionIndex: idx };
+    }
+
+    throw new Error(`Aksi Host tidak dikenal: ${type}`);
+  },
+});
+
+export const getHostSnapshot = query({
+  args: {
+    joinCode: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const session = await requireSessionByCode(ctx, args.joinCode);
+    const participants = await ctx.db
+      .query('participants')
+      .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+      .collect();
+
+    const totalQuestions = session.questionIds.length;
+    const leaderboard = computeLeaderboard(participants, totalQuestions);
+    const unfinished = participants.filter((p) => p.status !== 'finished');
+    const finishedCount = participants.length - unfinished.length;
+    const allParticipantsFinished = participants.length > 0 && unfinished.length === 0;
+    const canOpenReview =
+      session.status === 'completed' ||
+      session.status === 'review_open' ||
+      (session.status === 'in_progress' && allParticipantsFinished);
+
+    // Strictly gate review questions & explanations until status === 'review_open'
+    let review: any = null;
+    if (session.status === 'review_open') {
+      const allQs = await ctx.db.query('questionBank').collect();
+      const qMap = new Map(allQs.map((q) => [q.id, q]));
+      const allAnswers = await ctx.db
+        .query('participantAnswers')
+        .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+        .collect();
+
+      const questions = session.questionIds.map((qId, idx) => {
+        const qDef = qMap.get(qId);
+        const qAns = allAnswers.filter((a) => a.questionId === qId);
+        const optionCounts = { A: 0, B: 0, C: 0, D: 0, E: 0 };
+        for (const a of qAns) {
+          optionCounts[a.selectedOption] = (optionCounts[a.selectedOption] || 0) + 1;
+        }
+        return {
+          sequenceNumber: idx + 1,
+          id: qId,
+          category: qDef?.category ?? '',
+          subIndicator: qDef?.subIndicator ?? '',
+          question: qDef?.question ?? '',
+          options: qDef?.options ?? { A: '', B: '', C: '', D: '', E: '' },
+          figural: qDef?.figural ?? null,
+          correctOption: qDef?.correctOption,
+          explanation: qDef?.explanation ?? '',
+          explanationParts: qDef?.explanationParts ?? null,
+          optionCounts,
+          totalAnswered: qAns.length,
+        };
+      });
+
+      review = {
+        currentIndex: session.reviewQuestionIndex,
+        totalQuestions,
+        questions,
+      };
+    }
+
+    return {
+      session: {
+        id: String(session._id),
+        joinCode: session.joinCode,
+        title: session.title,
+        status: session.status,
+        joinOpen: session.joinOpen,
+        settings: session.settings,
+        totalQuestions,
+        maxPossibleScore: totalQuestions * session.settings.pointsCorrect,
+        reviewQuestionIndex: session.reviewQuestionIndex,
+        canOpenReview,
+        createdAt: session.createdAt,
+        startedAt: session.startedAt,
+        completedAt: session.completedAt,
+        reviewOpenedAt: session.reviewOpenedAt,
+      },
+      participantSummary: {
+        total: participants.length,
+        finishedCount,
+        workingCount: unfinished.length,
+        unfinishedNames: unfinished.map((p) => p.displayName),
+      },
+      leaderboard,
+      review,
+    };
+  },
+});
+
+export const getParticipantSnapshot = query({
+  args: {
+    joinCode: v.string(),
+    participantToken: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const session = await requireSessionByCode(ctx, args.joinCode);
+    const tokHash = await hashToken(args.participantToken || '');
+    const participant = await ctx.db
+      .query('participants')
+      .withIndex('by_session_token', (q) =>
+        q.eq('sessionId', session._id).eq('participantTokenHash', tokHash),
+      )
+      .first();
+
+    if (!participant) {
+      throw new Error('Sesi peserta tidak ditemukan. Silakan bergabung kembali.');
+    }
+
+    const allQs = await ctx.db.query('questionBank').collect();
+    const qMap = new Map(allQs.map((q) => [q.id, q]));
+
+    const myAnswers = await ctx.db
+      .query('participantAnswers')
+      .withIndex('by_participant', (q) => q.eq('participantId', participant._id))
+      .collect();
+    const ansByQId = new Map(myAnswers.map((a) => [a.questionId, a]));
+
+    const isReviewOpen = session.status === 'review_open';
+    const isSessionEnded =
+      session.status === 'completed' || session.status === 'review_open';
+    const totalQuestions = session.questionIds.length;
+
+    const questions = session.questionIds.map((qId, idx) => {
+      const qDef = qMap.get(qId);
+      const ans = ansByQId.get(qId);
+      const base: any = {
+        sequenceNumber: idx + 1,
+        id: qId,
+        category: session.settings.showSubIndicator ? qDef?.category : undefined,
+        subIndicator: session.settings.showSubIndicator ? qDef?.subIndicator : undefined,
+        question: qDef?.question ?? '',
+        options: qDef?.options ?? { A: '', B: '', C: '', D: '', E: '' },
+        figural: qDef?.figural ?? null,
+        selectedOption: ans?.selectedOption ?? null,
+      };
+
+      // Strictly lock correctOption, isCorrect, and explanations until review_open!
+      if (isReviewOpen && qDef) {
+        base.correctOption = qDef.correctOption;
+        base.isCorrect = ans ? ans.isCorrect : false;
+        base.explanation = qDef.explanation;
+        base.explanationParts = qDef.explanationParts;
+      }
+
+      return base;
+    });
+
+    // Personal result summary is only revealed when the participant has finished AND (session ended or all finished)
+    let personalResult: any = null;
+    if (isSessionEnded || participant.status === 'finished') {
+      const allParticipants = await ctx.db
+        .query('participants')
+        .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+        .collect();
+      const allDone =
+        isSessionEnded ||
+        (allParticipants.length > 0 &&
+          allParticipants.every((p) => p.status === 'finished'));
+
+      if (allDone) {
+        const lb = computeLeaderboard(allParticipants, totalQuestions);
+        const myRankEntry = lb.find((r) => r.participantId === String(participant._id));
+
+        const byCategoryMap = new Map<
+          string,
+          { category: string; total: number; answered: number; correct: number; wrong: number; score: number }
+        >();
+        const bySubMap = new Map<
+          string,
+          { subIndicator: string; category: string; total: number; answered: number; correct: number; wrong: number; score: number }
+        >();
+
+        for (const qId of session.questionIds) {
+          const qDef = qMap.get(qId);
+          if (!qDef) continue;
+          const ans = ansByQId.get(qId);
+
+          if (!byCategoryMap.has(qDef.category)) {
+            byCategoryMap.set(qDef.category, {
+              category: qDef.category,
+              total: 0,
+              answered: 0,
+              correct: 0,
+              wrong: 0,
+              score: 0,
+            });
+          }
+          const catStat = byCategoryMap.get(qDef.category)!;
+          catStat.total++;
+          if (ans) {
+            catStat.answered++;
+            if (ans.isCorrect) catStat.correct++;
+            else catStat.wrong++;
+            catStat.score += ans.pointsAwarded;
+          }
+
+          if (!bySubMap.has(qDef.subIndicator)) {
+            bySubMap.set(qDef.subIndicator, {
+              subIndicator: qDef.subIndicator,
+              category: qDef.category,
+              total: 0,
+              answered: 0,
+              correct: 0,
+              wrong: 0,
+              score: 0,
+            });
+          }
+          const subStat = bySubMap.get(qDef.subIndicator)!;
+          subStat.total++;
+          if (ans) {
+            subStat.answered++;
+            if (ans.isCorrect) subStat.correct++;
+            else subStat.wrong++;
+            subStat.score += ans.pointsAwarded;
+          }
+        }
+
+        personalResult = {
+          displayName: participant.displayName,
+          answeredCount: participant.answeredCount,
+          correctCount: participant.correctCount,
+          wrongCount: participant.wrongCount,
+          unansweredCount: Math.max(0, totalQuestions - participant.answeredCount),
+          score: participant.score,
+          maxPossibleScore: totalQuestions * session.settings.pointsCorrect,
+          accuracy: participant.accuracy,
+          rank: myRankEntry?.rank ?? 1,
+          isTied: myRankEntry?.isTied ?? false,
+          totalParticipants: allParticipants.length,
+          byCategory: Array.from(byCategoryMap.values()),
+          bySubIndicator: Array.from(bySubMap.values()),
+        };
+      }
+    }
+
+    return {
+      session: {
+        joinCode: session.joinCode,
+        title: session.title,
+        status: session.status,
+        joinOpen: session.joinOpen,
+        totalQuestions,
+        reviewQuestionIndex: session.reviewQuestionIndex,
+        settings: {
+          pointsCorrect: session.settings.pointsCorrect,
+          pointsWrong: session.settings.pointsWrong,
+          pointsBlank: session.settings.pointsBlank,
+          showSubIndicator: session.settings.showSubIndicator,
+          allowAnswerChange: session.settings.allowAnswerChange,
+        },
+      },
+      participant: {
+        id: String(participant._id),
+        displayName: participant.displayName,
+        status: participant.status,
+        currentQuestionIndex: participant.currentQuestionIndex,
+        answeredCount: participant.answeredCount,
+        totalQuestions,
+      },
+      questions,
+      personalResult,
+    };
+  },
+});
+
+// Dedicated endpoint for fetching review/explanation, strictly locked unless session.status === 'review_open'
+export const getReviewQuestion = query({
+  args: {
+    joinCode: v.string(),
+    questionIndex: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const session = await requireSessionByCode(ctx, args.joinCode);
+    if (session.status !== 'review_open') {
+      throw new Error(
+        'FORBIDDEN_REVIEW_LOCKED: Pembahasan belum dibuka. Seluruh peserta harus menyelesaikan simulasi atau Host harus mengakhiri sesi terlebih dahulu.',
+      );
+    }
+
+    const idx = Math.max(
+      0,
+      Math.min(
+        session.questionIds.length - 1,
+        Math.floor(Number(args.questionIndex ?? session.reviewQuestionIndex)),
+      ),
+    );
+    const qId = session.questionIds[idx];
+    const qDef = await ctx.db
+      .query('questionBank')
+      .withIndex('by_question_id', (q) => q.eq('id', qId))
+      .first();
+
+    if (!qDef) {
+      throw new Error('Soal tidak ditemukan.');
+    }
+
+    return {
+      sequenceNumber: idx + 1,
+      totalQuestions: session.questionIds.length,
+      id: qDef.id,
+      category: qDef.category,
+      subIndicator: qDef.subIndicator,
+      question: qDef.question,
+      options: qDef.options,
+      figural: qDef.figural ?? null,
+      correctOption: qDef.correctOption,
+      explanation: qDef.explanation,
+      explanationParts: qDef.explanationParts,
+    };
+  },
+});
+
+export const listSessions = query({
+  args: {},
+  handler: async (ctx) => {
+    const sessions = await ctx.db
+      .query('sessions')
+      .withIndex('by_createdAt')
+      .order('desc')
+      .take(30);
+
+    const items = [];
+    for (const s of sessions) {
+      const parts = await ctx.db
+        .query('participants')
+        .withIndex('by_session', (q) => q.eq('sessionId', s._id))
+        .collect();
+      items.push({
+        id: String(s._id),
+        joinCode: s.joinCode,
+        title: s.title,
+        status: s.status,
+        questionCount: s.questionIds.length,
+        participantCount: parts.length,
+        finishedCount: parts.filter((p) => p.status === 'finished').length,
+        createdAt: s.createdAt,
+        completedAt: s.completedAt,
+      });
+    }
+    return items;
+  },
+});
+
+export const deleteSession = mutation({
+  args: {
+    joinCode: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const session = await requireSessionByCode(ctx, args.joinCode);
+    const sqs = await ctx.db
+      .query('sessionQuestions')
+      .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+      .collect();
+    for (const sq of sqs) await ctx.db.delete(sq._id);
+
+    const ans = await ctx.db
+      .query('participantAnswers')
+      .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+      .collect();
+    for (const a of ans) await ctx.db.delete(a._id);
+
+    const parts = await ctx.db
+      .query('participants')
+      .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+      .collect();
+    for (const p of parts) await ctx.db.delete(p._id);
+
+    const evs = await ctx.db
+      .query('sessionEvents')
+      .withIndex('by_session', (q) => q.eq('sessionId', session._id))
+      .collect();
+    for (const ev of evs) await ctx.db.delete(ev._id);
+
+    await ctx.db.delete(session._id);
+    return { deleted: true };
   },
 });

@@ -1,39 +1,42 @@
-# LCC ARENA — Literacy & Numeracy Competition Arena
+# Simulasi CPNS — Drilling CAT TIU CPNS & Pembahasan Kelas
 
-Aplikasi simulasi lomba cerdas cermat numerasi SMP Kelas VII berbasis web dua layar (**IFP Display 1920×1080** + **Mobile Controller Smartphone**), dibangun mengikuti prinsip **Ponytail (`AGENTS.md`)**: **0 dependensi eksternal (`node_modules` = 0)**, siap berjalan 100% offline di jaringan Wi-Fi/Hotspot kelas.
+Platform drilling mandiri soal **TIU CPNS** (Verbal, Numerik, Figural) berbasis **Convex Realtime** + **Static SPA (Vercel)** untuk latihan kelas maupun mandiri.
 
-## Arsitektur (Opsi A — Zero-Dependency Local Classroom Server)
+## Fitur Utama
 
-- **Runtime:** Node.js v24+ native TypeScript (`node --no-warnings server.ts`)
-- **Database & Seed:** Built-in `node:sqlite` (`data/lcc_arena.sqlite`, mode WAL) + validasi & auto-seed otomatis 39 soal / 13 indikator dari `data/questions.json`
-- **Realtime & Kalibrasi Jam:** Native HTTP Server-Sent Events (`text/event-stream` + `EventSource`) dengan kalibrasi RTT monotonik (tahan selisih jam antara IFP dan HP)
-- **Keamanan Ruang:** `controller_token` disimpan sebagai hash `SHA-256` (`timingSafeEqual`), otomatis dihapus dari URL bar HP, dan kunci jawaban tidak pernah dikirim ke Display sebelum soal selesai & diizinkan operator
-- **QR Offline:** Generator SVG QR ISO/IEC 18004 mandiri di `src/qr.ts` (tanpa internet & tanpa membocorkan token ke layanan pihak ketiga)
+- **105 Soal TIU CPNS Standar CAT (Opsi A–E)**:
+  - **TIU Verbal (35 Soal)**: Analogi (12), Silogisme (12), Analitis (11)
+  - **TIU Numerik (45 Soal)**: Berhitung (12), Deret Angka (12), Perbandingan Kuantitatif (10), Soal Cerita (11)
+  - **TIU Figural (25 Soal)**: Analogi Figural (8), Ketidaksamaan Figural (8), Serial Figural (9) lengkap dengan diagram vektor `<svg>` presisi di batang soal dan 5 opsi jawaban.
+- **Tanpa Timer & Tanpa Batas 3 Pemain**: Peserta mengerjakan di HP masing-masing dengan ritme sendiri tanpa tekanan waktu.
+- **Tanpa Label Tingkat Kesulitan**: Semua soal disetarakan tanpa label mudah/menengah/sulit.
+- **Skor Standar CAT TIU**: Benar `+5`, Salah `0`, Kosong `0`.
+- **Proteksi Ketat Kunci & Pembahasan (Server-Side Lock)**:
+  - Selama sesi berlangsung (`waiting` / `in_progress`), payload API peserta tidak pernah mengirim `correctOption`, `isCorrect`, `score`, atau `explanationParts`.
+  - Mode Pembahasan Kelas (`review_open`) hanya terbuka setelah seluruh peserta menyelesaikan soal atau saat Host secara eksplisit mengakhiri sesi.
+- **Pembahasan Terstruktur 8 Bagian**:
+  1. Inti Pertanyaan
+  2. Informasi yang Diketahui
+  3. Strategi / Rumus / Pola
+  4. Langkah Penyelesaian Step-by-Step
+  5. Alasan Jawaban Benar
+  6. Analisis Pengecoh (Mengapa 4 opsi lain salah)
+  7. Tips Cepat / Pola Serupa
+  8. Cek Akhir
+- **3 Tema Tampilan Layar (IFP / Proyektor & HP)**:
+  - `🌙 Dark Arena`
+  - `🟩 Papan Tulis`
+  - `☀️ Kelas Terang`
 
-## Cara Menjalankan di Kelas (IFP + Smartphone)
+## Pengujian & Deploy
 
-Pastikan Node.js **v24+** terpasang, lalu jalankan:
-
-```powershell
-npm start
-```
-
-1. Buka `http://localhost:3000` pada laptop / IFP yang terhubung ke proyektor dan Wi-Fi/Hotspot kelas.
-2. Klik **Buat Pertandingan Baru**, isi nama 3 peserta, pilih mode (**Full Competition**, **Category Challenge**, atau **Quick Match**), lalu buat ruang.
-3. Pada halaman **Lobby Ruang**:
-   - Scan **QR Controller** menggunakan kamera HP Guru/Operator (pastikan HP berada di Wi-Fi/Hotspot yang sama).
-   - Klik **Jadikan Layar Ini IFP** (atau **Buka Tab Display**) untuk menampilkan layar publik `/display/:roomCode` di proyektor.
-4. Tekan **Mulai Pertandingan** dari HP Operator untuk menjalankan lomba hingga Podium Juara.
-
-### Konfigurasi Opsional (Environment Variables)
-
-- `PORT` — Port HTTP server (default: `3000`)
-- `HOST` — Alamat bind jaringan (default: `0.0.0.0` agar dapat diakses dari HP di LAN)
-
-## Menjalankan Pengujian Otomatis
-
-```powershell
+```bash
+# Jalankan verifikasi bank soal 105 item + simulasi alur backend Convex
 npm test
-```
 
-Menguji validasi 39 soal & 13 indikator (termasuk koreksi kunci `Q003 = B`), encoder QR SVG, seluruh transisi state machine, pembekuan/kelanjutan timer, pencegahan poin ganda (idempotensi), log koreksi skor, peringkat seri, serta simulasi E2E dua perangkat (Display + Controller) melalui HTTP & SSE.
+# Sinkronisasi skema & fungsi ke Convex
+npx convex dev --once
+
+# Seed 105 soal TIU CPNS ke database Convex
+npx convex run matches:ensureSeed
+```

@@ -1,11 +1,10 @@
 {
-  "name": "lcc-arena",
-  "version": "1.0.0",
+  "name": "simulasi-cpns",
+  "version": "1.2.0",
   "private": true,
-  "description": "LCC ARENA — Literacy & Numeracy Competition Arena (Kelas VII SMP)",
+  "description": "Simulasi CPNS — Platform Drilling CAT TIU CPNS (105 Soal Verbal, Numerik & Figural + Live Leaderboard + Pembahasan Kelas)",
   "type": "module",
   "scripts": {
-    "start": "node --no-warnings server.ts",
     "test": "node --no-warnings test.ts"
   },
   "engines": {

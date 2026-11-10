@@ -1,451 +1,335 @@
 import assert from 'node:assert/strict';
-import { PassThrough } from 'node:stream';
-import type http from 'node:http';
-import { LccEngine, AppError, computeStandings } from './src/engine.ts';
-import { encodeQrMatrix, renderQrSvg } from './src/qr.ts';
-import { createAppServer } from './server.ts';
+import { SEED_DATA } from './convex/seedData.ts';
+import * as matchesModule from './convex/matches.ts';
+import { renderFiguralStemHtml, renderFiguralOptionHtml } from './public/figural.js';
 
-console.log('=== LCC ARENA — Automated Verification Suite ===');
-
-// 1. Bank Soal & QR Verification
-{
-  const engine = new LccEngine(':memory:');
-  const summary = engine.getBankSummary();
-  assert.equal(summary.totalQuestions, 39, 'Harus tepat 39 soal aktif');
-  assert.equal(summary.indicators.length, 13, 'Harus tepat 13 indikator');
-  for (const ind of summary.indicators as { id: string; questionCount: number }[]) {
-    assert.equal(ind.questionCount, 3, `Indikator ${ind.id} harus memiliki 3 soal`);
-  }
-
-  const q003 = engine.db.prepare(`SELECT correct_option FROM questions WHERE id = 'Q003'`).get() as { correct_option: string };
-  assert.equal(q003.correct_option, 'B', 'Kunci Q003 wajib B (24 poin)');
-  const q037 = engine.db.prepare(`SELECT question_text, options_json FROM questions WHERE id = 'Q037'`).get() as {
-    question_text: string;
-    options_json: string;
-  };
-  assert.ok(q037.question_text.includes('x + 3 < 8'), 'Simbol < pada Q037 harus terjaga');
-  assert.ok(q037.options_json.includes('x < 5'), 'Opsi Q037 harus menjaga simbol <');
-
-  const url = 'http://192.168.1.10:3000/controller/ABC234#t=2345-6789-ABCD';
-  const matrix = encodeQrMatrix(url);
-  assert.ok(matrix && matrix.length >= 29, 'Matrix QR harus terbentuk untuk URL LAN');
-  assert.equal(matrix[0][0], true, 'Top-left finder corner harus gelap');
-  assert.equal(matrix[1][1], false, 'Top-left finder ring dalam harus terang');
-  assert.equal(matrix[3][3], true, 'Top-left finder core harus gelap');
-  const svg = renderQrSvg(url);
-  assert.ok(svg.startsWith('<svg ') && svg.includes('<path '), 'SVG QR harus valid');
-
-  engine.close();
-  console.log('[PASS] Phase 1: Bank Soal (39 soal, 13 indikator, Q003=B, simbol) & Offline QR SVG');
+function getHandler(fnObj: any): (ctx: any, args: any) => Promise<any> {
+  if (typeof fnObj?._handler === 'function') return fnObj._handler;
+  if (typeof fnObj === 'function') return fnObj;
+  throw new Error('Cannot extract handler from Convex function object');
 }
 
-// 2. Game Engine State Machine, Timer Freeze/Resume, Security & Idempotency
-{
-  const engine = new LccEngine(':memory:');
+class MockQueryChain {
+  private rows: any[];
+  constructor(rows: any[]) {
+    this.rows = [...rows];
+  }
+  withIndex(_indexName: string, cb?: (q: any) => any) {
+    if (cb) {
+      const filters: Array<{ field: string; val: any }> = [];
+      const qBuilder = {
+        eq(field: string, val: any) {
+          filters.push({ field, val });
+          return qBuilder;
+        },
+      };
+      cb(qBuilder);
+      this.rows = this.rows.filter((r) => filters.every((f) => r[f.field] === f.val));
+    }
+    return this;
+  }
+  order(dir: 'asc' | 'desc') {
+    this.rows.sort((a, b) => (dir === 'desc' ? b._creationTime - a._creationTime : a._creationTime - b._creationTime));
+    return this;
+  }
+  async collect() {
+    return [...this.rows];
+  }
+  async first() {
+    return this.rows[0] ?? null;
+  }
+  async take(n: number) {
+    return this.rows.slice(0, n);
+  }
+}
 
-  assert.throws(
-    () => engine.createMatch({ players: ['Andi', 'andi', 'Budi'], mode: 'QUICK', questionCount: 3 }),
-    (e: unknown) => e instanceof AppError && e.code === 'DUPLICATE_PLAYER_NAME',
-  );
-  assert.throws(
-    () => engine.createMatch({ players: ['Andi', '  ', 'Budi'], mode: 'QUICK', questionCount: 3 }),
-    (e: unknown) => e instanceof AppError && e.code === 'EMPTY_PLAYER_NAME',
-  );
-  assert.throws(
-    () => engine.createMatch({ players: ['Andi', 'Budi', 'Citra'], mode: 'QUICK', questionCount: 50 }),
-    (e: unknown) => e instanceof AppError && e.code === 'INSUFFICIENT_QUESTIONS',
-  );
+class MockConvexDb {
+  private tables = new Map<string, Map<string, any>>();
+  private seq = 1;
 
-  const t0 = 1_000_000;
-  const { roomCode, controllerToken, snapshot } = engine.createMatch(
-    {
-      players: ['Andi', 'Budi', 'Citra'],
-      mode: 'QUICK',
-      questionCount: 3,
-      order: 'sequential',
-      durationSeconds: 20,
-      pointsCorrect: 10,
+  private table(name: string): Map<string, any> {
+    if (!this.tables.has(name)) this.tables.set(name, new Map());
+    return this.tables.get(name)!;
+  }
+
+  async insert(tableName: string, doc: any) {
+    const id = `${tableName}:${this.seq++}`;
+    const record = { ...doc, _id: id, _creationTime: Date.now() + this.seq };
+    this.table(tableName).set(id, record);
+    return id;
+  }
+
+  async get(id: string) {
+    for (const tbl of this.tables.values()) {
+      if (tbl.has(id)) return { ...tbl.get(id) };
+    }
+    return null;
+  }
+
+  async patch(id: string, fields: any) {
+    for (const tbl of this.tables.values()) {
+      if (tbl.has(id)) {
+        const cur = tbl.get(id);
+        tbl.set(id, { ...cur, ...fields });
+        return;
+      }
+    }
+    throw new Error(`Document not found: ${id}`);
+  }
+
+  async delete(id: string) {
+    for (const tbl of this.tables.values()) {
+      if (tbl.has(id)) {
+        tbl.delete(id);
+        return;
+      }
+    }
+  }
+
+  query(tableName: string) {
+    const rows = Array.from(this.table(tableName).values());
+    return new MockQueryChain(rows);
+  }
+}
+
+async function runTests() {
+  console.log('=== 1. Verifikasi Bank Soal 105 TIU CPNS & Figural SVG ===');
+  assert.equal(SEED_DATA.subIndicators.length, 10, 'Harus ada tepat 10 sub-indikator TIU');
+  assert.equal(SEED_DATA.questions.length, 105, 'Harus ada tepat 105 soal TIU CPNS');
+
+  const byCat: Record<string, number> = {};
+  const seenIds = new Set<string>();
+  let figuralCount = 0;
+
+  for (const q of SEED_DATA.questions) {
+    assert.ok(!seenIds.has(q.id), `Duplikat id soal: ${q.id}`);
+    seenIds.add(q.id);
+    byCat[q.category] = (byCat[q.category] || 0) + 1;
+
+    // Tidak boleh ada properti tingkat kesulitan
+    assert.equal('level' in q, false, `Soal ${q.id} tidak boleh memiliki properti level`);
+    assert.equal('difficulty' in q, false, `Soal ${q.id} tidak boleh memiliki properti difficulty`);
+
+    // 5 opsi A-E
+    for (const key of ['A', 'B', 'C', 'D', 'E'] as const) {
+      assert.ok(typeof q.options[key] === 'string' && q.options[key].length > 0, `Opsi ${key} kosong pada ${q.id}`);
+    }
+    assert.ok(['A', 'B', 'C', 'D', 'E'].includes(q.correctOption), `correctOption tidak valid pada ${q.id}`);
+
+    // 8 bagian penjelasan edukatif
+    const ep = q.explanationParts;
+    assert.ok(ep, `explanationParts wajib ada pada ${q.id}`);
+    assert.ok(ep.coreQuestion.length > 5, `coreQuestion kosong pada ${q.id}`);
+    assert.ok(ep.knownInformation.length > 5, `knownInformation kosong pada ${q.id}`);
+    assert.ok(ep.strategy.length > 5, `strategy kosong pada ${q.id}`);
+    assert.ok(typeof ep.solutionSteps === 'string' && ep.solutionSteps.length > 10, `solutionSteps kosong pada ${q.id}`);
+    assert.ok(ep.correctAnswerReason.length > 5, `correctAnswerReason kosong pada ${q.id}`);
+    assert.ok(typeof ep.distractorAnalysis === 'string' && ep.distractorAnalysis.length > 10, `distractorAnalysis kosong pada ${q.id}`);
+    assert.ok(ep.patternTip.length > 5, `patternTip kosong pada ${q.id}`);
+    assert.ok(ep.finalCheck.length > 5, `finalCheck kosong pada ${q.id}`);
+
+    // Figural SVG check
+    if (q.category === 'TIU Figural') {
+      figuralCount++;
+      assert.ok(q.figural, `Soal figural ${q.id} wajib punya deskriptor figural`);
+      const stemSvg = renderFiguralStemHtml(q);
+      if (q.figural.kind !== 'odd') {
+        assert.ok(stemSvg.includes('<svg'), `Stem figural ${q.id} harus merender <svg>`);
+      }
+      for (const k of ['A', 'B', 'C', 'D', 'E'] as const) {
+        const optHtml = renderFiguralOptionHtml(q, k, q.options[k]);
+        assert.ok(optHtml.includes('<svg'), `Opsi ${k} pada soal figural ${q.id} harus merender <svg>`);
+      }
+    }
+  }
+
+  assert.equal(byCat['TIU Verbal'], 35, 'TIU Verbal harus 35 soal');
+  assert.equal(byCat['TIU Numerik'], 45, 'TIU Numerik harus 45 soal');
+  assert.equal(byCat['TIU Figural'], 25, 'TIU Figural harus 25 soal');
+  assert.equal(figuralCount, 25, 'Jumlah soal figural ber-SVG harus 25 soal');
+  console.log('✓ 105 soal TIU CPNS (35 Verbal, 45 Numerik, 25 Figural SVG) + 8-step pembahasan valid.');
+
+  console.log('=== 2. Simulasi End-to-End Convex Session, Multi-Participant, Lock & Review ===');
+  const db = new MockConvexDb();
+  const ctx = { db };
+
+  const ensureSeed = getHandler(matchesModule.ensureSeed);
+  const createSession = getHandler(matchesModule.createSession);
+  const joinSession = getHandler(matchesModule.joinSession);
+  const submitAnswer = getHandler(matchesModule.submitAnswer);
+  const finishParticipantSession = getHandler(matchesModule.finishParticipantSession);
+  const hostDispatch = getHandler(matchesModule.hostDispatch);
+  const getHostSnapshot = getHandler(matchesModule.getHostSnapshot);
+  const getParticipantSnapshot = getHandler(matchesModule.getParticipantSnapshot);
+  const getReviewQuestion = getHandler(matchesModule.getReviewQuestion);
+
+  const seedRes = await ensureSeed(ctx, {});
+  assert.equal(seedRes.total, 105);
+
+  // Buat sesi drilling 5 soal
+  const sessionRes = await createSession(ctx, {
+    title: 'Simulasi TIU Batch 1',
+    subIndicatorIds: ['SUB-01', 'SUB-04', 'SUB-08'],
+    questionCount: 5,
+    order: 'random',
+    allowAnswerChange: false,
+  });
+  assert.equal(sessionRes.joinCode.length, 6);
+  assert.ok(sessionRes.hostToken.startsWith('HOST-'));
+  assert.equal(sessionRes.questionCount, 5);
+
+  // 4 peserta bergabung (membuktikan tidak ada batas 3 pemain + penanganan nama duplikat)
+  const p1 = await joinSession(ctx, { joinCode: sessionRes.joinCode, displayName: 'Andi' });
+  const p2 = await joinSession(ctx, { joinCode: sessionRes.joinCode, displayName: 'Andi' }); // harus menjadi Andi (2)
+  const p3 = await joinSession(ctx, { joinCode: sessionRes.joinCode, displayName: 'Budi' });
+  const p4 = await joinSession(ctx, { joinCode: sessionRes.joinCode, displayName: 'Citra' });
+
+  assert.equal(p1.displayName, 'Andi');
+  assert.equal(p2.displayName, 'Andi (2)');
+  assert.equal(p1.recovered, false);
+
+  // Tes recovery token saat refresh browser
+  const p1Recovered = await joinSession(ctx, {
+    joinCode: sessionRes.joinCode,
+    displayName: 'Andi',
+    participantToken: p1.participantToken,
+  });
+  assert.equal(p1Recovered.recovered, true);
+  assert.equal(p1Recovered.participantId, p1.participantId);
+
+  // Mulai sesi oleh Host
+  await hostDispatch(ctx, {
+    joinCode: sessionRes.joinCode,
+    hostToken: sessionRes.hostToken,
+    action: { type: 'START_SESSION' },
+  });
+
+  // Ambil snapshot peserta 1 saat in_progress: pastikan kunci & pembahasan TIDAK bocor
+  const snapInProgress = await getParticipantSnapshot(ctx, {
+    joinCode: sessionRes.joinCode,
+    participantToken: p1.participantToken,
+  });
+  assert.equal(snapInProgress.session.status, 'in_progress');
+  assert.equal(snapInProgress.questions.length, 5);
+  for (const q of snapInProgress.questions) {
+    assert.equal('correctOption' in q, false, 'correctOption TIDAK BOLEH bocor saat in_progress');
+    assert.equal('explanation' in q, false, 'explanation TIDAK BOLEH bocor saat in_progress');
+    assert.equal('explanationParts' in q, false, 'explanationParts TIDAK BOLEH bocor saat in_progress');
+  }
+
+  // Pastikan endpoint getReviewQuestion terkunci rapat saat in_progress
+  await assert.rejects(
+    async () => {
+      await getReviewQuestion(ctx, { joinCode: sessionRes.joinCode, questionIndex: 0 });
     },
-    t0,
-  );
-  assert.equal(snapshot.match.status, 'LOBBY');
-  const [p1, p2, p3] = snapshot.players;
-
-  assert.throws(
-    () => engine.dispatchAction(roomCode, 'XXXX-YYYY-ZZZZ', { type: 'START_MATCH' }, t0 + 100),
-    (e: unknown) => e instanceof AppError && e.statusCode === 401,
+    /FORBIDDEN_REVIEW_LOCKED/,
+    'getReviewQuestion harus menolak akses saat sesi masih in_progress'
   );
 
-  engine.dispatchAction(roomCode, controllerToken, { type: 'START_MATCH' }, t0 + 100);
-  const dispReady = engine.getSnapshot(roomCode, 'display', t0 + 100);
-  const ctrlReady = engine.getSnapshot(roomCode, 'controller', t0 + 100);
-  assert.equal(dispReady.match.status, 'READY');
-  assert.equal(dispReady.currentQuestion?.questionText, null);
-  assert.equal(dispReady.currentQuestion?.correctOption, null);
-  assert.ok(ctrlReady.currentQuestion?.questionText);
-  assert.ok(ctrlReady.currentQuestion?.correctOption);
-
-  // Q1 starts at t=10_000 (deadline=30_000)
-  engine.dispatchAction(roomCode, controllerToken, { type: 'START_QUESTION' }, 10_000);
-  assert.equal(engine.getSnapshot(roomCode, 'display', 10_000).currentQuestion?.deadlineAt, 30_000);
-
-  // Select P1 at 15_400 (rem=14_600) -> cancel at 18_000 (deadline=32_600)
-  engine.dispatchAction(roomCode, controllerToken, { type: 'SELECT_PLAYER', playerId: p1.id }, 15_400);
-  let snap = engine.getSnapshot(roomCode, 'display', 17_000);
-  assert.equal(snap.match.status, 'ANSWERING');
-  assert.equal(snap.currentQuestion?.remainingMs, 14_600);
-  engine.dispatchAction(roomCode, controllerToken, { type: 'CANCEL_SELECTION' }, 18_000);
-  snap = engine.getSnapshot(roomCode, 'display', 18_000);
-  assert.equal(snap.match.status, 'RUNNING');
-  assert.equal(snap.currentQuestion?.deadlineAt, 32_600);
-
-  // P1 wrong at 22_600 (rem=10_000), judged at 25_000 -> deadline=35_000
-  engine.dispatchAction(roomCode, controllerToken, { type: 'SELECT_PLAYER', playerId: p1.id }, 22_600);
-  engine.dispatchAction(roomCode, controllerToken, { type: 'JUDGE_WRONG' }, 25_000);
-  snap = engine.getSnapshot(roomCode, 'display', 25_000);
-  assert.equal(snap.match.status, 'RUNNING');
-  assert.equal(snap.currentQuestion?.deadlineAt, 35_000);
-  assert.equal(snap.players[0].score, 0);
-
-  assert.throws(
-    () => engine.dispatchAction(roomCode, controllerToken, { type: 'SELECT_PLAYER', playerId: p1.id }, 26_000),
-    (e: unknown) => e instanceof AppError && e.code === 'PLAYER_ALREADY_ATTEMPTED',
-  );
-
-  // Pause at 27_000 (rem=8_000), resume at 40_000 (deadline=48_000)
-  engine.dispatchAction(roomCode, controllerToken, { type: 'PAUSE_MATCH' }, 27_000);
-  assert.equal(engine.getSnapshot(roomCode, 'display', 35_000).currentQuestion?.remainingMs, 8_000);
-  engine.dispatchAction(roomCode, controllerToken, { type: 'RESUME_MATCH' }, 40_000);
-  assert.equal(engine.getSnapshot(roomCode, 'display', 40_000).currentQuestion?.deadlineAt, 48_000);
-
-  // P2 correct + idempotency + double-click protection
-  engine.dispatchAction(roomCode, controllerToken, { type: 'SELECT_PLAYER', playerId: p2.id }, 42_000);
-  engine.dispatchAction(roomCode, controllerToken, { type: 'JUDGE_CORRECT', actionId: 'act-1' }, 43_000);
-  engine.dispatchAction(roomCode, controllerToken, { type: 'JUDGE_CORRECT', actionId: 'act-1' }, 43_050);
-  assert.throws(
-    () => engine.dispatchAction(roomCode, controllerToken, { type: 'JUDGE_CORRECT', actionId: 'act-2' }, 43_100),
-    (e: unknown) => e instanceof AppError && e.statusCode === 409,
-  );
-  snap = engine.getSnapshot(roomCode, 'display', 43_200);
-  assert.equal(snap.players[1].score, 10);
-  assert.equal(snap.currentQuestion?.correctOption, null);
-
-  engine.dispatchAction(roomCode, controllerToken, { type: 'REVEAL_ANSWER', reveal: true }, 43_500);
-  assert.ok(engine.getSnapshot(roomCode, 'display', 43_500).currentQuestion?.correctOption);
-
-  // Q2: All 3 wrong -> immediate finish
-  engine.dispatchAction(roomCode, controllerToken, { type: 'NEXT_QUESTION' }, 50_000);
-  engine.dispatchAction(roomCode, controllerToken, { type: 'START_QUESTION' }, 51_000);
-  for (const [idx, pl] of [p1, p2, p3].entries()) {
-    engine.dispatchAction(roomCode, controllerToken, { type: 'SELECT_PLAYER', playerId: pl.id }, 52_000 + idx * 2000);
-    engine.dispatchAction(roomCode, controllerToken, { type: 'JUDGE_WRONG' }, 53_000 + idx * 2000);
-  }
-  snap = engine.getSnapshot(roomCode, 'display', 58_000);
-  assert.equal(snap.match.status, 'QUESTION_FINISHED');
-  assert.equal(snap.currentQuestion?.result, 'ALL_WRONG');
-
-  // Q3: Timeout + score adjustment + tie ranking
-  engine.dispatchAction(roomCode, controllerToken, { type: 'NEXT_QUESTION' }, 60_000);
-  engine.dispatchAction(roomCode, controllerToken, { type: 'START_QUESTION' }, 61_000);
-  assert.throws(
-    () => engine.dispatchAction(roomCode, controllerToken, { type: 'SELECT_PLAYER', playerId: p1.id }, 81_005),
-    (e: unknown) => e instanceof AppError && e.code === 'INVALID_STATE',
-  );
-  snap = engine.getSnapshot(roomCode, 'display', 81_010);
-  assert.equal(snap.currentQuestion?.result, 'TIMEOUT');
-
-  engine.dispatchAction(
-    roomCode,
-    controllerToken,
-    { type: 'ADJUST_SCORE', playerId: p1.id, delta: 10, reason: 'Koreksi salah tekan tombol' },
-    82_500,
-  );
-  assert.equal(engine.getHistoryDetail(roomCode).questions[0].correctOption, null);
-
-  engine.dispatchAction(roomCode, controllerToken, { type: 'NEXT_QUESTION' }, 85_000);
-  const finalSnap = engine.getSnapshot(roomCode, 'display', 85_000);
-  assert.equal(finalSnap.match.status, 'MATCH_FINISHED');
-  assert.equal(finalSnap.standings[0].rank, 1);
-  assert.equal(finalSnap.standings[0].isTied, true);
-  assert.equal(finalSnap.standings[1].rank, 1);
-  assert.equal(finalSnap.standings[2].rank, 3);
-
-  const fullHistory = engine.getHistoryDetail(roomCode);
-  assert.ok(fullHistory.questions[0].correctOption);
-  assert.equal(fullHistory.scoreAdjustments.length, 1);
-  engine.deleteHistory(fullHistory.id);
-  assert.equal(engine.listHistory().length, 0);
-
-  const threeWay = computeStandings([
-    { id: '1', seatNumber: 1, score: 20 },
-    { id: '2', seatNumber: 2, score: 20 },
-    { id: '3', seatNumber: 3, score: 20 },
-  ]);
-  assert.deepEqual(threeWay.standings.map((s) => [s.rank, s.isTied]), [
-    [1, true],
-    [1, true],
-    [1, true],
-  ]);
-
-  engine.close();
-  console.log('[PASS] Phase 2: State Machine, Timer Freeze/Resume, Security, Audit Log & Tie Ranking');
-}
-
-// 3. Full Two-Device HTTP + SSE Realtime Simulation (IFP Display + Mobile Controller)
-function createInProcessClient(server: http.Server) {
-  async function request(method: string, urlPath: string, opts: { headers?: Record<string, string>; body?: unknown } = {}) {
-    const reqStream = new PassThrough();
-    const req = Object.assign(reqStream, {
-      method,
-      url: urlPath,
-      headers: {
-        host: 'localhost:3000',
-        ...Object.fromEntries(Object.entries(opts.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v])),
-      },
-      socket: { remoteAddress: '127.0.0.1' },
-    }) as unknown as http.IncomingMessage;
-
-    const resStream = new PassThrough();
-    let statusCode = 200;
-    const res = Object.assign(resStream, {
-      writeHead(code: number) {
-        statusCode = code;
-        return res;
-      },
-    }) as unknown as http.ServerResponse;
-
-    server.emit('request', req, res);
-    if (opts.body !== undefined) reqStream.end(JSON.stringify(opts.body));
-    else reqStream.end();
-
-    const chunks: Buffer[] = [];
-    for await (const c of resStream) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
-    const text = Buffer.concat(chunks).toString('utf8');
-    return {
-      status: statusCode,
-      text: () => text,
-      json: () => JSON.parse(text),
-    };
-  }
-
-  async function openSse(urlPath: string) {
-    const reqStream = new PassThrough();
-    const req = Object.assign(reqStream, {
-      method: 'GET',
-      url: urlPath,
-      headers: { host: 'localhost:3000' },
-      socket: { remoteAddress: '127.0.0.1' },
-    }) as unknown as http.IncomingMessage;
-
-    const resStream = new PassThrough();
-    let statusCode = 200;
-    let headResolved = false;
-    let resolveHead!: (code: number) => void;
-    const headPromise = new Promise<number>((r) => { resolveHead = r; });
-
-    const res = Object.assign(resStream, {
-      writeHead(code: number) {
-        statusCode = code;
-        if (!headResolved) {
-          headResolved = true;
-          resolveHead(code);
-        }
-        return res;
-      },
-    }) as unknown as http.ServerResponse;
-
-    const events: Record<string, unknown>[] = [];
-    let waiters: (() => void)[] = [];
-    let buf = '';
-    resStream.setEncoding('utf8');
-    resStream.on('data', (chunk: string) => {
-      buf += chunk;
-      const frames = buf.split('\n\n');
-      buf = frames.pop() ?? '';
-      for (const f of frames) {
-        const dataLine = f.split('\n').find((l) => l.startsWith('data: '));
-        if (dataLine) {
-          try {
-            const parsed = JSON.parse(dataLine.slice(6));
-            if (parsed.match) {
-              events.push(parsed);
-              const pending = waiters;
-              waiters = [];
-              pending.forEach((w) => w());
-            }
-          } catch { /* ignore */ }
-        }
-      }
-    });
-
-    server.emit('request', req, res);
-    reqStream.end();
-    const code = await headPromise;
-
-    const waitFor = async (pred: (ev: Record<string, unknown>) => boolean, timeoutMs = 2000) => {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        const hit = [...events].reverse().find(pred);
-        if (hit) return hit;
-        await new Promise<void>((r) => {
-          const t = setTimeout(r, 25);
-          waiters.push(() => { clearTimeout(t); r(); });
-        });
-      }
-      throw new Error(`SSE waitFor timeout on ${urlPath}`);
-    };
-
-    return {
-      statusCode: code,
-      events,
-      waitFor,
-      close: () => {
-        req.emit('close');
-        resStream.destroy();
-      },
-    };
-  }
-
-  return { request, openSse };
-}
-
-{
-  const memEngine = new LccEngine(':memory:');
-  const { server, shutdown } = createAppServer(memEngine);
-  const client = createInProcessClient(server);
-
-  try {
-    // Static SPA & assets check
-    const spaRes = await client.request('GET', '/display/DEMO01');
-    assert.equal(spaRes.status, 200);
-    assert.ok(spaRes.text().includes('<div id="app"'));
-
-    const cssRes = await client.request('GET', '/styles.css');
-    assert.equal(cssRes.status, 200);
-
-    const qrRes = await client.request('GET', `/api/qr?text=${encodeURIComponent('http://192.168.1.5:3000/display/DEMO01')}`);
-    assert.equal(qrRes.status, 200);
-    assert.ok(qrRes.text().includes('<svg'));
-
-    // Audio assets check
-    const correctMp3Res = await client.request('GET', '/correct.mp3');
-    assert.equal(correctMp3Res.status, 200);
-    const falseMp3Res = await client.request('GET', '/false.mp3');
-    assert.equal(falseMp3Res.status, 200);
-
-    // Create 2-question match
-    const createRes = await client.request('POST', '/api/matches', {
-      body: {
-        players: ['Regu Alpha', 'Regu Beta', 'Regu Gamma'],
-        mode: 'CATEGORY',
-        indicatorIds: ['IND-01'],
-        levels: [1, 2],
-        durationSeconds: 20,
-        pointsCorrect: 10,
-      },
-    });
-    assert.equal(createRes.status, 201);
-    const created = createRes.json() as {
-      roomCode: string;
-      controllerToken: string;
-      snapshot: { players: { id: string }[] };
-    };
-    const { roomCode, controllerToken } = created;
-    const [pA, pB] = created.snapshot.players;
-
-    // Unauthorized controller SSE must be rejected 401
-    const badCtrl = await client.openSse(`/api/matches/${roomCode}/stream?role=controller&token=WRONG`);
-    assert.equal(badCtrl.statusCode, 401);
-
-    // Connect Device 1 (IFP Display) & Device 2 (Mobile Controller) simultaneously
-    const displayStream = await client.openSse(`/api/matches/${roomCode}/stream?role=display`);
-    const ctrlStream = await client.openSse(
-      `/api/matches/${roomCode}/stream?role=controller&token=${encodeURIComponent(controllerToken)}`,
-    );
-    assert.equal(displayStream.statusCode, 200);
-    assert.equal(ctrlStream.statusCode, 200);
-
-    // Both devices detect presence { display: 1, controller: 1 }
-    await ctrlStream.waitFor((ev) => (ev.connections as { display: number }).display === 1);
-    await displayStream.waitFor((ev) => (ev.connections as { controller: number }).controller === 1);
-
-    const postAction = async (body: Record<string, unknown>) => {
-      const r = await client.request('POST', `/api/matches/${roomCode}/action`, {
-        headers: { 'X-Controller-Token': controllerToken },
-        body,
+  // Pastikan Host tidak bisa langsung OPEN_REVIEW jika peserta belum selesai semua
+  await assert.rejects(
+    async () => {
+      await hostDispatch(ctx, {
+        joinCode: sessionRes.joinCode,
+        hostToken: sessionRes.hostToken,
+        action: { type: 'OPEN_REVIEW' },
       });
-      assert.equal(r.status, 200);
-      return r.json();
-    };
+    },
+    /Pembahasan belum dapat dibuka/,
+    'OPEN_REVIEW harus ditolak selama masih ada peserta yang belum selesai'
+  );
 
-    // Play Question 1: Start Match -> Start Question -> Regu Alpha WRONG -> Regu Beta CORRECT -> Reveal Answer
-    await postAction({ type: 'START_MATCH' });
-    await displayStream.waitFor((ev) => (ev.match as { status: string }).status === 'READY');
+  // Pastikan END_SESSION meminta konfirmasi jika ada peserta yang belum selesai
+  await assert.rejects(
+    async () => {
+      await hostDispatch(ctx, {
+        joinCode: sessionRes.joinCode,
+        hostToken: sessionRes.hostToken,
+        action: { type: 'END_SESSION' },
+      });
+    },
+    /UNFINISHED_PARTICIPANTS:/,
+    'END_SESSION tanpa confirmUnfinished harus memberi peringatan peserta belum selesai'
+  );
 
-    await postAction({ type: 'START_QUESTION' });
-    const dispQ1Running = await displayStream.waitFor(
-      (ev) => (ev.match as { status: string }).status === 'RUNNING',
-    );
-    assert.equal((dispQ1Running.currentQuestion as { correctOption: unknown }).correctOption, null);
-
-    await postAction({ type: 'SELECT_PLAYER', playerId: pA.id });
-    await displayStream.waitFor((ev) => (ev.match as { status: string }).status === 'ANSWERING');
-
-    await postAction({ type: 'JUDGE_WRONG' });
-    await displayStream.waitFor(
-      (ev) =>
-        (ev.match as { status: string }).status === 'RUNNING' &&
-        ((ev.currentQuestion as { attemptedPlayerIds: string[] }).attemptedPlayerIds || []).includes(pA.id),
-    );
-
-    await postAction({ type: 'SELECT_PLAYER', playerId: pB.id });
-    await postAction({ type: 'JUDGE_CORRECT' });
-    const dispFinished = await displayStream.waitFor(
-      (ev) => (ev.match as { status: string }).status === 'QUESTION_FINISHED',
-    );
-    assert.equal((dispFinished.currentQuestion as { correctOption: unknown }).correctOption, null);
-
-    await postAction({ type: 'REVEAL_ANSWER', reveal: true });
-    const dispRevealed = await displayStream.waitFor((ev) =>
-      Boolean((ev.currentQuestion as { correctOption?: string | null } | null)?.correctOption),
-    );
-    assert.equal((dispRevealed.currentQuestion as { correctOption: string }).correctOption, 'B'); // Q001 = B
-
-    // Simulate Browser Refresh on IFP Display mid-match -> state stays intact
-    displayStream.close();
-    const refreshRes = await client.request('GET', `/api/matches/${roomCode}`);
-    assert.equal(refreshRes.status, 200);
-    const refreshed = refreshRes.json() as { players: { score: number }[]; match: { status: string } };
-    assert.equal(refreshed.players[1].score, 10);
-    assert.equal(refreshed.match.status, 'QUESTION_FINISHED');
-
-    const displayReconnected = await client.openSse(`/api/matches/${roomCode}/stream?role=display`);
-
-    // Play Question 2 & finish match -> Podium on IFP Display
-    await postAction({ type: 'NEXT_QUESTION' });
-    await postAction({ type: 'START_QUESTION' });
-    await postAction({ type: 'SELECT_PLAYER', playerId: pB.id });
-    await postAction({ type: 'JUDGE_CORRECT' });
-    await postAction({ type: 'NEXT_QUESTION' }); // Advances past Q2/2 -> MATCH_FINISHED
-
-    const dispPodium = await displayReconnected.waitFor(
-      (ev) => (ev.match as { status: string }).status === 'MATCH_FINISHED',
-    );
-    assert.equal((dispPodium.standings as { score: number }[])[0].score, 20);
-
-    // Verify History API
-    const histListRes = await client.request('GET', '/api/history');
-    const histList = histListRes.json() as { items: { id: string; roomCode: string }[] };
-    assert.equal(histList.items.length, 1);
-    assert.equal(histList.items[0].roomCode, roomCode);
-
-    displayReconnected.close();
-    ctrlStream.close();
-    console.log('[PASS] Phase 3–5: Two-Device HTTP + SSE Realtime Sync, Refresh Recovery & History E2E');
-  } finally {
-    await shutdown();
-    memEngine.close();
+  // Simulasikan pengerjaan soal oleh p1 (semua 5 soal dijawab)
+  const qMap = new Map(SEED_DATA.questions.map((q) => [q.id, q]));
+  for (const sq of snapInProgress.questions) {
+    const fullQ = qMap.get(sq.id)!;
+    const res = await submitAnswer(ctx, {
+      joinCode: sessionRes.joinCode,
+      participantToken: p1.participantToken,
+      questionId: sq.id,
+      selectedOption: fullQ.correctOption as 'A' | 'B' | 'C' | 'D' | 'E', // p1 menjawab benar semua (skor 25)
+    });
+    assert.equal(res.saved, true);
+    assert.equal('isCorrect' in res, false, 'Respons submitAnswer tidak boleh membocorkan isCorrect');
   }
+
+  // Cek bahwa setelah p1 menjawab semua 5 soal, status p1 otomatis 'finished'
+  const snapP1Done = await getParticipantSnapshot(ctx, {
+    joinCode: sessionRes.joinCode,
+    participantToken: p1.participantToken,
+  });
+  assert.equal(snapP1Done.participant.status, 'finished');
+  // Tetapi karena p2, p3, p4 belum selesai, personalResult dan kunci jawaban masih terkunci!
+  assert.equal(snapP1Done.personalResult, null, 'Ringkasan personal belum boleh terbuka sebelum seluruh peserta selesai');
+
+  // Sekarang p2 menjawab 3 benar, 2 salah lalu selesai
+  for (let i = 0; i < snapInProgress.questions.length; i++) {
+    const sq = snapInProgress.questions[i];
+    const fullQ = qMap.get(sq.id)!;
+    const wrongOpt = (['A', 'B', 'C', 'D', 'E'] as const).find((o) => o !== fullQ.correctOption)!;
+    await submitAnswer(ctx, {
+      joinCode: sessionRes.joinCode,
+      participantToken: p2.participantToken,
+      questionId: sq.id,
+      selectedOption: (i < 3 ? fullQ.correctOption : wrongOpt) as 'A' | 'B' | 'C' | 'D' | 'E',
+    });
+  }
+
+  // p3 dan p4 klik selesai sekarang (finishParticipantSession)
+  await finishParticipantSession(ctx, { joinCode: sessionRes.joinCode, participantToken: p3.participantToken });
+  await finishParticipantSession(ctx, { joinCode: sessionRes.joinCode, participantToken: p4.participantToken });
+
+  // Cek status sesi otomatis menjadi 'completed' setelah seluruh peserta selesai
+  const hostSnapCompleted = await getHostSnapshot(ctx, { joinCode: sessionRes.joinCode });
+  assert.equal(hostSnapCompleted.session.status, 'completed');
+  assert.equal(hostSnapCompleted.session.canOpenReview, true);
+  assert.equal(hostSnapCompleted.leaderboard[0].displayName, 'Andi');
+  assert.equal(hostSnapCompleted.leaderboard[0].score, 25);
+  assert.equal(hostSnapCompleted.leaderboard[1].displayName, 'Andi (2)');
+  assert.equal(hostSnapCompleted.leaderboard[1].score, 15);
+
+  // Sekarang Host membuka Mode Pembahasan Kelas (OPEN_REVIEW)
+  await hostDispatch(ctx, {
+    joinCode: sessionRes.joinCode,
+    hostToken: sessionRes.hostToken,
+    action: { type: 'OPEN_REVIEW' },
+  });
+
+  // Verifikasi di mode review_open: peserta dan layar kelas dapat mengakses kunci, pembahasan 8 bagian, dan ringkasan personal
+  const snapReview = await getParticipantSnapshot(ctx, {
+    joinCode: sessionRes.joinCode,
+    participantToken: p2.participantToken,
+  });
+  assert.equal(snapReview.session.status, 'review_open');
+  assert.ok(snapReview.personalResult, 'personalResult harus tersedia saat review_open');
+  assert.equal(snapReview.personalResult.score, 15);
+  assert.equal(snapReview.personalResult.correctCount, 3);
+  assert.equal(snapReview.personalResult.wrongCount, 2);
+  assert.ok(snapReview.questions[0].correctOption, 'correctOption harus terbuka saat review_open');
+  assert.ok(snapReview.questions[0].explanationParts, 'explanationParts harus terbuka saat review_open');
+
+  const reviewQ1 = await getReviewQuestion(ctx, { joinCode: sessionRes.joinCode, questionIndex: 0 });
+  assert.equal(reviewQ1.sequenceNumber, 1);
+  assert.ok(reviewQ1.correctOption);
+  assert.ok(reviewQ1.explanationParts.coreQuestion.length > 0);
+
+  console.log('✓ Simulasi siklus sesi, multi-peserta, proteksi kunci jawaban, leaderboard, dan review_open lulus 100%.');
 }
 
-console.log('\nALL CHECKS PASSED SUCCESSFULLY.');
+runTests().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
